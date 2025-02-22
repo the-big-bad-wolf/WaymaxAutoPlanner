@@ -70,3 +70,4 @@ Pipfile.lock
 poetry.lock
 
 data/
+runs/
