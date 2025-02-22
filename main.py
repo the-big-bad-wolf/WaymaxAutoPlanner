@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import mediapy
 import numpy as np
 import skrl.envs.wrappers.jax as skrl_wrappers
+from skrl import config
 from dm_env import specs
 from jax import jit
 from skrl.agents.jax.ppo import PPO, PPO_DEFAULT_CONFIG
@@ -22,6 +23,9 @@ from waymax import config as _config
 from waymax import dataloader, datatypes, dynamics
 from waymax import env as _env
 from waymax import visualization
+
+# Set the backend to "jax" or "numpy"
+config.jax.backend = "jax"
 
 # path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
 path = "./data/training_tfexample.tfrecord@5"
@@ -61,6 +65,12 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         self._jax = True
         self._env = env
         self._scenario_loader = scenario_loader
+        self._jit_step = jit(self._env.step)
+        self._jit_reset = jit(self._env.reset)
+        self._jit_observe = jit(self._env.observe)
+        self._jit_reward = jit(self._env.reward)
+        self._jit_truncation = jit(self._env.truncation)
+        self._jit_termination = jit(self._env.termination)
 
     @override
     def reset(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
@@ -69,8 +79,8 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         :return: Observation, info
         :rtype: np.ndarray or jax.Array and any other info
         """
-        self._state = self._env.reset(next(self._scenario_loader))
-        observation = self._env.observe(self._state)
+        self._state = self._jit_reset(next(self._scenario_loader))
+        observation = self._jit_observe(self._state)
         return observation, {}
 
     @override
@@ -92,12 +102,11 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         action = datatypes.Action(
             data=jnp.array(actions), valid=jnp.array([True])  # type: ignore
         )
-        self._state = self._env.step(self._state, action)
-        reward = jnp.array([[self._env.reward(self._state, action)]])
-        print(reward)
-        observation = self._env.observe(self._state)
-        terminated = jnp.array([self._env.termination(self._state)])
-        truncated = jnp.array([self._env.truncation(self._state)])
+        self._state = self._jit_step(self._state, action)
+        reward = self._jit_reward(self._state, action)
+        observation = self._jit_observe(self._state)
+        terminated = self._env.termination(self._state)
+        truncated = self._env.truncation(self._state)
         return observation, reward, terminated, truncated, {}
 
     def state(self) -> Union[np.ndarray, jax.Array]:
@@ -204,7 +213,6 @@ for role, model in models.items():
 # configure and instantiate the agent (visit its documentation to see all the options)
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html#configuration-and-hyperparameters
 cfg = PPO_DEFAULT_CONFIG.copy()
-cfg["rollouts"] = 1024  # memory_size
 
 agent = PPO(
     models=models,
