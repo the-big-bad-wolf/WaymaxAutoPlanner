@@ -4,15 +4,16 @@ from typing import Any, Dict, Iterator, List, Sequence, Tuple, Union, override
 import flax
 import flax.linen as nn
 import gymnasium
-import skrl
 import jax
 import jax.numpy as jnp
 import mediapy
 import numpy as np
+import numpy as jnp
+import skrl
 import skrl.envs.wrappers.jax as skrl_wrappers
-from skrl import config
 from dm_env import specs
 from jax import jit
+from skrl import config
 from skrl.agents.jax.ppo import PPO, PPO_DEFAULT_CONFIG
 from skrl.memories.jax import RandomMemory
 from skrl.models.jax import DeterministicMixin, GaussianMixin, Model
@@ -26,6 +27,8 @@ from waymax import visualization
 
 # Set the backend to "jax" or "numpy"
 config.jax.backend = "jax"
+config.jax.device = jax.devices("cpu")[0]
+device = jax.devices("cpu")[0]
 
 # path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
 path = "./data/training_tfexample.tfrecord@5"
@@ -52,7 +55,6 @@ env = _env.PlanningAgentEnvironment(
     sim_agent_actors=[agents.create_sim_agents_from_config(sim_agent_config)],
     sim_agent_params=[{}],
 )
-actor = agents.create_expert_actor(dynamics_model=dynamics_model)
 
 
 class WaymaxWrapper(skrl_wrappers.Wrapper):
@@ -62,15 +64,18 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         scenario_loader: Iterator[datatypes.SimulatorState],
     ):
         super().__init__(env)
-        self._jax = True
         self._env = env
         self._scenario_loader = scenario_loader
+
         self._jit_step = jit(self._env.step)
         self._jit_reset = jit(self._env.reset)
         self._jit_observe = jit(self._env.observe)
         self._jit_reward = jit(self._env.reward)
         self._jit_truncation = jit(self._env.truncation)
         self._jit_termination = jit(self._env.termination)
+
+        print("action_spec", self.action_space)
+        print("observation_spec", self.observation_space)
 
     @override
     def reset(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
@@ -99,14 +104,13 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         :return: Observation, reward, terminated, truncated, info
         :rtype: tuple of np.ndarray or jax.Array and any other info
         """
-        action = datatypes.Action(
-            data=jnp.array(actions), valid=jnp.array([True])  # type: ignore
-        )
+        action = datatypes.Action(data=actions, valid=jnp.ones((1,), dtype=bool))
         self._state = self._jit_step(self._state, action)
-        reward = self._jit_reward(self._state, action)
+        reward = jnp.array([[self._jit_reward(self._state, action)]])
         observation = self._jit_observe(self._state)
-        terminated = self._env.termination(self._state)
-        truncated = self._env.truncation(self._state)
+        terminated = jnp.array([self._jit_termination(self._state)])
+        truncated = jnp.array([self._jit_truncation(self._state)])
+
         return observation, reward, terminated, truncated, {}
 
     def state(self) -> Union[np.ndarray, jax.Array]:
@@ -136,7 +140,10 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         """The observation specs of this environment, without batch dimension."""
         observation_spec: specs.BoundedArray = self._env.observation_spec()
         return gymnasium.spaces.Box(
-            low=observation_spec.minimum, high=observation_spec.maximum, dtype=observation_spec.dtype  # type: ignore
+            shape=observation_spec.shape,  # type: ignore
+            low=observation_spec.minimum,
+            high=observation_spec.maximum,
+            dtype=observation_spec.dtype,  # type: ignore
         )
 
     @property
@@ -195,15 +202,17 @@ class Value(DeterministicMixin, Model):
 
 
 # instantiate a memory as rollout buffer (any memory can be used for this)
-memory = RandomMemory(memory_size=1024, num_envs=env.num_envs)
+memory = RandomMemory(memory_size=1024, num_envs=env.num_envs, device=device)
 
 
 # instantiate the agent's models (function approximators).
 # PPO requires 2 models, visit its documentation for more details
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html#models
 models = {}
-models["policy"] = Policy(env.observation_space, env.action_space, clip_actions=True)
-models["value"] = Value(env.observation_space, env.action_space)
+models["policy"] = Policy(
+    env.observation_space, env.action_space, clip_actions=True, device=device
+)
+models["value"] = Value(env.observation_space, env.action_space, device)
 
 # instantiate models' state dict
 for role, model in models.items():
@@ -213,18 +222,18 @@ for role, model in models.items():
 # configure and instantiate the agent (visit its documentation to see all the options)
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html#configuration-and-hyperparameters
 cfg = PPO_DEFAULT_CONFIG.copy()
-
 agent = PPO(
     models=models,
     memory=memory,
     cfg=cfg,
     observation_space=env.observation_space,
     action_space=env.action_space,
+    device=device,
 )
 
 
 # configure and instantiate the RL trainer
-cfg_trainer = {"timesteps": 100000, "headless": True}
+cfg_trainer = {"timesteps": 1000, "headless": True}
 trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
 # start training
