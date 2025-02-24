@@ -82,7 +82,8 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         :rtype: np.ndarray or jax.Array and any other info
         """
         self._state = self._jit_reset(next(self._scenario_loader))
-        observation = self._jit_observe(self._state)
+        observation = self._jit_observe(self._state).reshape(1, 1)
+        # observation = np.array(observation).reshape(1, 1)
         return observation, {}
 
     @override
@@ -101,6 +102,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         :return: Observation, reward, terminated, truncated, info
         :rtype: tuple of np.ndarray or jax.Array and any other info
         """
+        actions = actions.flatten()
         action = datatypes.Action(data=actions, valid=jnp.ones((1,), dtype=bool))
         self._state = self._jit_step(self._state, action)
         reward = self._jit_reward(self._state, action).reshape(1, 1)
@@ -108,6 +110,10 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         terminated = self._jit_termination(self._state).reshape(1, 1)
         truncated = self._jit_truncation(self._state).reshape(1, 1)
 
+        # observation = np.array(observation).reshape(1, 1)
+        # reward = np.array(reward).reshape(1, 1)
+        # terminated = np.array(terminated).reshape(1, 1)
+        # truncated = np.array(truncated).reshape(1, 1)
         return observation, reward, terminated, truncated, {}
 
     def state(self) -> Union[np.ndarray, jax.Array]:
@@ -227,7 +233,7 @@ agent = PPO(
 
 
 # configure and instantiate the RL trainer
-cfg_trainer = {"timesteps": 1000, "headless": True}
+cfg_trainer = {"timesteps": 100, "headless": True}
 trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
 # start training
