@@ -1,15 +1,11 @@
 import dataclasses
-from typing import Any, Dict, Iterator, List, Sequence, Tuple, Union, override
+from typing import Any, Iterator, Tuple, Union, override
 
-import flax
 import flax.linen as nn
 import gymnasium
 import jax
 import jax.numpy as jnp
-import mediapy
 import numpy as np
-import numpy as jnp
-import skrl
 import skrl.envs.wrappers.jax as skrl_wrappers
 from dm_env import specs
 from jax import jit
@@ -18,43 +14,44 @@ from skrl.agents.jax.ppo import PPO, PPO_DEFAULT_CONFIG
 from skrl.memories.jax import RandomMemory
 from skrl.models.jax import DeterministicMixin, GaussianMixin, Model
 from skrl.trainers.jax import SequentialTrainer
-from tqdm import tqdm
 from waymax import agents
 from waymax import config as _config
 from waymax import dataloader, datatypes, dynamics
 from waymax import env as _env
-from waymax import visualization
 
 # Set the backend to "jax" or "numpy"
 config.jax.backend = "jax"
 config.jax.device = jax.devices("cpu")[0]
-device = jax.devices("cpu")[0]
 
-# path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
-path = "./data/training_tfexample.tfrecord@5"
-max_num_objects = 32
-data_loader_config = dataclasses.replace(
-    _config.WOD_1_1_0_TRAINING,
-    path=path,
-    max_num_objects=max_num_objects,
-    max_num_rg_points=30000,
-)
-data_iter = dataloader.simulator_state_generator(config=data_loader_config)
-sim_agent_config = _config.SimAgentConfig(
-    agent_type=_config.SimAgentType.IDM, controlled_objects=_config.ObjectType.NON_SDC
-)
-env_config = dataclasses.replace(
-    _config.EnvironmentConfig(),
-    max_num_objects=max_num_objects,
-    sim_agents=[sim_agent_config],
-)
-dynamics_model = dynamics.InvertibleBicycleModel(normalize_actions=True)
-env = _env.PlanningAgentEnvironment(
-    dynamics_model=dynamics_model,
-    config=env_config,
-    sim_agent_actors=[agents.create_sim_agents_from_config(sim_agent_config)],
-    sim_agent_params=[{}],
-)
+
+def setup_waymax():
+    # path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
+    path = "./data/training_tfexample.tfrecord@5"
+    max_num_objects = 32
+    data_loader_config = dataclasses.replace(
+        _config.WOD_1_1_0_TRAINING,
+        path=path,
+        max_num_objects=max_num_objects,
+        max_num_rg_points=30000,
+    )
+    data_iter = dataloader.simulator_state_generator(config=data_loader_config)
+    sim_agent_config = _config.SimAgentConfig(
+        agent_type=_config.SimAgentType.IDM,
+        controlled_objects=_config.ObjectType.NON_SDC,
+    )
+    env_config = dataclasses.replace(
+        _config.EnvironmentConfig(),
+        max_num_objects=max_num_objects,
+        sim_agents=[sim_agent_config],
+    )
+    dynamics_model = dynamics.InvertibleBicycleModel(normalize_actions=True)
+    env = _env.PlanningAgentEnvironment(
+        dynamics_model=dynamics_model,
+        config=env_config,
+        sim_agent_actors=[agents.create_sim_agents_from_config(sim_agent_config)],
+        sim_agent_params=[{}],
+    )
+    return env, data_iter
 
 
 class WaymaxWrapper(skrl_wrappers.Wrapper):
@@ -64,7 +61,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         scenario_loader: Iterator[datatypes.SimulatorState],
     ):
         super().__init__(env)
-        self._env = env
+        self._env: _env.PlanningAgentEnvironment
         self._scenario_loader = scenario_loader
 
         self._jit_step = jit(self._env.step)
@@ -106,10 +103,10 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         """
         action = datatypes.Action(data=actions, valid=jnp.ones((1,), dtype=bool))
         self._state = self._jit_step(self._state, action)
-        reward = jnp.array([[self._jit_reward(self._state, action)]])
-        observation = self._jit_observe(self._state)
-        terminated = jnp.array([self._jit_termination(self._state)])
-        truncated = jnp.array([self._jit_truncation(self._state)])
+        reward = self._jit_reward(self._state, action).reshape(1, 1)
+        observation = self._jit_observe(self._state).reshape(1, 1)
+        terminated = self._jit_termination(self._state).reshape(1, 1)
+        truncated = self._jit_truncation(self._state).reshape(1, 1)
 
         return observation, reward, terminated, truncated, {}
 
@@ -155,9 +152,6 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         )
 
 
-env = WaymaxWrapper(env, data_iter)
-
-
 class Policy(GaussianMixin, Model):
     def __init__(
         self,
@@ -201,18 +195,19 @@ class Value(DeterministicMixin, Model):
         return x, {}
 
 
+env, data_iter = setup_waymax()
+env = WaymaxWrapper(env, data_iter)
+
 # instantiate a memory as rollout buffer (any memory can be used for this)
-memory = RandomMemory(memory_size=1024, num_envs=env.num_envs, device=device)
+memory = RandomMemory(memory_size=1024, num_envs=env.num_envs)
 
 
 # instantiate the agent's models (function approximators).
 # PPO requires 2 models, visit its documentation for more details
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html#models
 models = {}
-models["policy"] = Policy(
-    env.observation_space, env.action_space, clip_actions=True, device=device
-)
-models["value"] = Value(env.observation_space, env.action_space, device)
+models["policy"] = Policy(env.observation_space, env.action_space, clip_actions=True)
+models["value"] = Value(env.observation_space, env.action_space)
 
 # instantiate models' state dict
 for role, model in models.items():
@@ -228,7 +223,6 @@ agent = PPO(
     cfg=cfg,
     observation_space=env.observation_space,
     action_space=env.action_space,
-    device=device,
 )
 
 
