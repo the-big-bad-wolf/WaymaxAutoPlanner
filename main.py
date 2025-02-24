@@ -205,7 +205,7 @@ env, data_iter = setup_waymax()
 env = WaymaxWrapper(env, data_iter)
 
 # instantiate a memory as rollout buffer (any memory can be used for this)
-memory = RandomMemory(memory_size=1024, num_envs=env.num_envs)
+memory = RandomMemory(memory_size=128, num_envs=env.num_envs)
 
 
 # instantiate the agent's models (function approximators).
@@ -223,6 +223,8 @@ for role, model in models.items():
 # configure and instantiate the agent (visit its documentation to see all the options)
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html#configuration-and-hyperparameters
 cfg = PPO_DEFAULT_CONFIG.copy()
+
+
 agent = PPO(
     models=models,
     memory=memory,
@@ -233,7 +235,7 @@ agent = PPO(
 
 
 # configure and instantiate the RL trainer
-cfg_trainer = {"timesteps": 100, "headless": True}
+cfg_trainer = {"timesteps": 1000, "headless": True}
 trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
 # start training
