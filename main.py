@@ -1,10 +1,11 @@
 import dataclasses
-from typing import Any, Iterator, Tuple, Union, override
+from typing import Any, Iterator, List, Tuple, Union, override
 
 import flax.linen as nn
 import gymnasium
 import jax
 import jax.numpy as jnp
+import mediapy
 import numpy as np
 import skrl.envs.wrappers.jax as skrl_wrappers
 from dm_env import specs
@@ -18,6 +19,7 @@ from waymax import agents
 from waymax import config as _config
 from waymax import dataloader, datatypes, dynamics
 from waymax import env as _env
+from waymax import visualization
 
 # Set the backend to "jax" or "numpy"
 config.jax.backend = "jax"
@@ -63,6 +65,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         super().__init__(env)
         self._env: _env.PlanningAgentEnvironment
         self._scenario_loader = scenario_loader
+        self._states: List[_env.PlanningAgentSimulatorState] = []  # For rendering
 
         self._jit_step = jit(self._env.step)
         self._jit_reset = jit(self._env.reset)
@@ -103,7 +106,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         :rtype: tuple of np.ndarray or jax.Array and any other info
         """
         actions = actions.flatten()
-        action = datatypes.Action(data=actions, valid=jnp.ones((1,), dtype=bool))
+        action = datatypes.Action(data=actions, valid=jnp.ones((1,), dtype=bool))  # type: ignore
         self._state = self._jit_step(self._state, action)
         reward = self._jit_reward(self._state, action).reshape(1, 1)
         observation = self._jit_observe(self._state).reshape(1, 1)
@@ -126,17 +129,24 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         """
         raise NotImplementedError
 
+    @override
     def render(self, *args, **kwargs) -> Any:
         """Render the environment
 
         :return: Any value from the wrapped environment
         :rtype: any
         """
-        pass
+        self._state: _env.PlanningAgentSimulatorState
+        self._states.append(self._state)  # store state for video generation
 
+    @override
     def close(self) -> None:
         """Close the environment"""
-        pass
+        print("Closing environment")
+        imgs = []
+        for state in self._states:
+            imgs.append(visualization.plot_simulator_state(state, use_log_traj=True))
+        mediapy.write_video("./waymax.mp4", imgs, fps=10)
 
     @property
     def observation_space(self) -> gymnasium.Space:
@@ -180,7 +190,7 @@ class Policy(GaussianMixin, Model):
     def __call__(self, inputs, role):
         x = nn.relu(nn.Dense(64)(inputs["states"]))
         x = nn.relu(nn.Dense(64)(x))
-        x = nn.Dense(self.num_actions)(x)
+        x = nn.Dense(self.num_actions)(x)  # type: ignore
         log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
         # Pendulum-v1 action_space is -2 to 2
         return 2 * nn.tanh(x), log_std, {}
@@ -205,7 +215,7 @@ env, data_iter = setup_waymax()
 env = WaymaxWrapper(env, data_iter)
 
 # instantiate a memory as rollout buffer (any memory can be used for this)
-memory = RandomMemory(memory_size=128, num_envs=env.num_envs)
+memory = RandomMemory(memory_size=64, num_envs=env.num_envs)
 
 
 # instantiate the agent's models (function approximators).
@@ -235,8 +245,12 @@ agent = PPO(
 
 
 # configure and instantiate the RL trainer
-cfg_trainer = {"timesteps": 1000, "headless": True}
+cfg_trainer = {"timesteps": 1000, "headless": True, "close_environment_at_exit": True}
 trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
 # start training
 trainer.train()
+
+# visualize the training
+trainer.headless = False
+trainer.eval()
