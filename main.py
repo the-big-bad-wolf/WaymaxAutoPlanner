@@ -22,14 +22,14 @@ from waymax import env as _env
 from waymax import visualization
 
 # Set the backend to "jax" or "numpy"
-config.jax.backend = "jax"
+config.jax.backend = "numpy"
 config.jax.device = jax.devices("cpu")[0]
 
 
 def setup_waymax():
     # path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
     path = "./data/training_tfexample.tfrecord@5"
-    max_num_objects = 32
+    max_num_objects = 128
     data_loader_config = dataclasses.replace(
         _config.WOD_1_1_0_TRAINING,
         path=path,
@@ -56,6 +56,34 @@ def setup_waymax():
     return env, data_iter
 
 
+def merged_step(
+    env: _env.PlanningAgentEnvironment,
+    state: _env.PlanningAgentSimulatorState,
+    actions: Union[np.ndarray, jax.Array],
+):
+    action = datatypes.Action(data=actions.flatten(), valid=jnp.ones((1,), dtype=bool))  # type: ignore
+    new_state = env.step(state, action)
+    reward = env.reward(state, action).reshape(1, 1)
+    observation = env.observe(new_state).reshape(1, 1)
+    terminated = env.termination(new_state).reshape(1, 1)
+    truncated = env.truncation(new_state).reshape(1, 1)
+    return new_state, observation, reward, terminated, truncated
+
+
+merged_step = jit(merged_step, static_argnums=(0,))
+
+
+def merged_reset(
+    env: _env.PlanningAgentEnvironment, scenario: datatypes.SimulatorState
+):
+    state = env.reset(scenario)
+    observation = env.observe(state).reshape(1, 1)
+    return state, observation
+
+
+merged_reset = jit(merged_reset, static_argnums=(0,))
+
+
 class WaymaxWrapper(skrl_wrappers.Wrapper):
     def __init__(
         self,
@@ -66,14 +94,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         self._env: _env.PlanningAgentEnvironment
         self._scenario_loader = scenario_loader
         self._states: List[_env.PlanningAgentSimulatorState] = []  # For rendering
-
-        self._jit_step = jit(self._env.step)
-        self._jit_reset = jit(self._env.reset)
-        self._jit_observe = jit(self._env.observe)
-        self._jit_reward = jit(self._env.reward)
-        self._jit_truncation = jit(self._env.truncation)
-        self._jit_termination = jit(self._env.termination)
-
+        self._state: _env.PlanningAgentSimulatorState | None = None
         print("action_spec", self.action_space)
         print("observation_spec", self.observation_space)
 
@@ -84,9 +105,9 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         :return: Observation, info
         :rtype: np.ndarray or jax.Array and any other info
         """
-        self._state = self._jit_reset(next(self._scenario_loader))
-        observation = self._jit_observe(self._state).reshape(1, 1)
-        # observation = np.array(observation).reshape(1, 1)
+        scenario = next(self._scenario_loader)
+        self._state, observation = merged_reset(self._env, scenario)
+        observation = np.array(observation).reshape(1, 1)
         return observation, {}
 
     @override
@@ -105,18 +126,14 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         :return: Observation, reward, terminated, truncated, info
         :rtype: tuple of np.ndarray or jax.Array and any other info
         """
-        actions = actions.flatten()
-        action = datatypes.Action(data=actions, valid=jnp.ones((1,), dtype=bool))  # type: ignore
-        self._state = self._jit_step(self._state, action)
-        reward = self._jit_reward(self._state, action).reshape(1, 1)
-        observation = self._jit_observe(self._state).reshape(1, 1)
-        terminated = self._jit_termination(self._state).reshape(1, 1)
-        truncated = self._jit_truncation(self._state).reshape(1, 1)
+        self._state, observation, reward, terminated, truncated = merged_step(
+            self._env, self._state, actions  # type: ignore
+        )
 
-        # observation = np.array(observation).reshape(1, 1)
-        # reward = np.array(reward).reshape(1, 1)
-        # terminated = np.array(terminated).reshape(1, 1)
-        # truncated = np.array(truncated).reshape(1, 1)
+        observation = np.array(observation).reshape(1, 1)
+        reward = np.array(reward).reshape(1, 1)
+        terminated = np.array(terminated).reshape(1, 1)
+        truncated = np.array(truncated).reshape(1, 1)
         return observation, reward, terminated, truncated, {}
 
     def state(self) -> Union[np.ndarray, jax.Array]:
@@ -136,12 +153,14 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         :return: Any value from the wrapped environment
         :rtype: any
         """
-        self._state: _env.PlanningAgentSimulatorState
-        self._states.append(self._state)  # store state for video generation
+        self._states.append(self._state)  # type: ignore # store state for video generation
 
     @override
     def close(self) -> None:
         """Close the environment"""
+        if len(self._states) == 0:
+            return
+
         imgs = []
         for state in self._states:
             imgs.append(visualization.plot_simulator_state(state, use_log_traj=True))
@@ -251,5 +270,5 @@ trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 trainer.train()
 
 # visualize the training
-trainer.headless = False
+trainer.headless = True
 trainer.eval()
