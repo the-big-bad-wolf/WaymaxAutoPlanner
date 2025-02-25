@@ -142,7 +142,6 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
     @override
     def close(self) -> None:
         """Close the environment"""
-        print("Closing environment")
         imgs = []
         for state in self._states:
             imgs.append(visualization.plot_simulator_state(state, use_log_traj=True))
