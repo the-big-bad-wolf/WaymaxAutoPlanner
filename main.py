@@ -29,7 +29,7 @@ config.jax.device = jax.devices("cpu")[0]
 def setup_waymax():
     # path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
     path = "./data/training_tfexample.tfrecord@5"
-    max_num_objects = 128
+    max_num_objects = 32
     data_loader_config = dataclasses.replace(
         _config.WOD_1_1_0_TRAINING,
         path=path,
@@ -165,6 +165,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         for state in self._states:
             imgs.append(visualization.plot_simulator_state(state, use_log_traj=True))
         mediapy.write_video("./waymax.mp4", imgs, fps=10)
+        self._states.clear()
 
     @property
     def observation_space(self) -> gymnasium.Space:
@@ -182,7 +183,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         """Action space"""
         action_spec: specs.BoundedArray = self._env.action_spec().data  # type: ignore
         return gymnasium.spaces.Box(
-            low=action_spec.minimum, high=action_spec.maximum, dtype=action_spec.dtype  # type: ignore
+            low=action_spec.minimum, high=action_spec.maximum, shape=(2,), dtype=action_spec.dtype  # type: ignore
         )
 
 
@@ -210,8 +211,7 @@ class Policy(GaussianMixin, Model):
         x = nn.relu(nn.Dense(64)(x))
         x = nn.Dense(self.num_actions)(x)  # type: ignore
         log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
-        # Pendulum-v1 action_space is -2 to 2
-        return 2 * nn.tanh(x), log_std, {}
+        return nn.tanh(x), log_std, {}
 
 
 class Value(DeterministicMixin, Model):
@@ -233,14 +233,15 @@ env, data_iter = setup_waymax()
 env = WaymaxWrapper(env, data_iter)
 
 # instantiate a memory as rollout buffer (any memory can be used for this)
-memory = RandomMemory(memory_size=64, num_envs=env.num_envs)
+mem_size = 64
+memory = RandomMemory(memory_size=mem_size, num_envs=1)
 
 
 # instantiate the agent's models (function approximators).
 # PPO requires 2 models, visit its documentation for more details
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html#models
 models = {}
-models["policy"] = Policy(env.observation_space, env.action_space, clip_actions=True)
+models["policy"] = Policy(env.observation_space, env.action_space)
 models["value"] = Value(env.observation_space, env.action_space)
 
 # instantiate models' state dict
@@ -251,6 +252,7 @@ for role, model in models.items():
 # configure and instantiate the agent (visit its documentation to see all the options)
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html#configuration-and-hyperparameters
 cfg = PPO_DEFAULT_CONFIG.copy()
+cfg["rollouts"] = mem_size  # memory_size
 
 
 agent = PPO(
