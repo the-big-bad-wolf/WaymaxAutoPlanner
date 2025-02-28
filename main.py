@@ -20,10 +20,52 @@ from waymax import config as _config
 from waymax import dataloader, datatypes, dynamics
 from waymax import env as _env
 from waymax import visualization
+from waymax.env import typedefs as types
 
 # Set the backend to "jax" or "numpy"
 config.jax.backend = "numpy"
 config.jax.device = jax.devices("cpu")[0]
+
+
+class WaymaxEnv(_env.PlanningAgentEnvironment):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @override
+    def observe(self, state: _env.PlanningAgentSimulatorState) -> Any:
+        """Computes the observation for the given simulation state.
+
+        Here we assume that the default observation is just the simulator state. We
+        leave this for the user to override in order to provide a user-specific
+        observation function. A user can use this to move some of their model
+        specific post-processing into the environment rollout in the actor nodes. If
+        they want this post-processing on the accelerator, they can keep this the
+        same and implement it on the learner side. We provide some helper functions
+        at datatypes.observation.py to help write your own observation functions.
+
+        Args:
+          state: Current state of the simulator of shape (...).
+
+        Returns:
+          Simulator state as an observation without modifications of shape (...).
+        """
+        # Get base observation first
+        observation = datatypes.sdc_observation_from_state(state)
+        ego_state = datatypes.select_by_onehot(
+            observation.trajectory,
+            observation.is_ego,
+        )
+        jax.debug.breakpoint()
+        return jnp.zeros((1,), dtype=jnp.float32)
+
+    @override
+    def observation_spec(self) -> types.Observation:
+        return specs.BoundedArray(
+            shape=(1,),
+            minimum=jnp.array([0]),
+            maximum=jnp.array([1]),
+            dtype=jnp.float32,
+        )
 
 
 def setup_waymax():
@@ -47,7 +89,7 @@ def setup_waymax():
         sim_agents=[sim_agent_config],
     )
     dynamics_model = dynamics.InvertibleBicycleModel(normalize_actions=True)
-    env = _env.PlanningAgentEnvironment(
+    env = WaymaxEnv(
         dynamics_model=dynamics_model,
         config=env_config,
         sim_agent_actors=[agents.create_sim_agents_from_config(sim_agent_config)],
