@@ -51,47 +51,49 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
           Simulator state as an observation without modifications of shape (...).
         """
         # Get base observation first
-        observation = datatypes.sdc_observation_from_state(state)
+        observation = datatypes.sdc_observation_from_state(state, roadgraph_top_k=2000)
+
         sdc_trajectory = datatypes.select_by_onehot(
             observation.trajectory,
             observation.is_ego,
         )
-
-        sdc_yaw_cur = datatypes.select_by_onehot(
-            state.sim_trajectory.yaw[..., state.timestep],
-            state.object_metadata.is_sdc,
-            keepdims=False,
-        )
-        sdc_xy_end = datatypes.select_by_onehot(
+        sdc_velocity_xy = sdc_trajectory.vel_xy
+        sdc_xy_goal = datatypes.select_by_onehot(
             state.log_trajectory.xy[..., -1, :],
             state.object_metadata.is_sdc,
             keepdims=True,
         )
-        sdc_yaw_end = datatypes.select_by_onehot(
+        sdc_xy_goal = utils.transform_points(observation.pose2d.matrix, sdc_xy_goal)[0]
+        sdc_yaw_goal = datatypes.select_by_onehot(
             state.log_trajectory.yaw[..., -1],
             state.object_metadata.is_sdc,
             keepdims=True,
         )
-        sdc_xy_end = utils.transform_points(observation.pose2d.matrix, sdc_xy_end)[0]
 
-        sdc_velocity_xy = sdc_trajectory.vel_xy[0][0]
+        _, sdc_idx = jax.lax.top_k(observation.is_ego, k=1)
+        non_sdc_xy = jnp.delete(
+            observation.trajectory.xy, sdc_idx, axis=1, assume_unique_indices=True
+        ).reshape(127, 2)
+        non_sdc_vel_xy = jnp.delete(
+            observation.trajectory.vel_xy, sdc_idx, axis=1, assume_unique_indices=True
+        ).reshape(127, 2)
 
-        heading_x = jnp.cos(sdc_yaw_cur)
-        heading_y = jnp.sin(sdc_yaw_cur)
+        non_sdc_valid = jnp.delete(
+            observation.trajectory.valid, sdc_idx, axis=1, assume_unique_indices=True
+        ).reshape(127, 1)
 
-        roadgraph_points = observation.roadgraph_static_points.xy.reshape(2000)
-        types = observation.roadgraph_static_points.types
-        roadgraph_points_types = jax.nn.one_hot(types, num_classes=19).reshape(
-            1000 * 19
+        roadgraph_points = observation.roadgraph_static_points.xy
+        roadgraph_points_types = jax.nn.one_hot(
+            observation.roadgraph_static_points.types, num_classes=19
         )
-
         obs = jnp.concatenate(
             [
-                sdc_xy_end,
-                sdc_velocity_xy,
-                jnp.stack([heading_x, heading_y], axis=-1),
-                roadgraph_points,
-                roadgraph_points_types,
+                sdc_xy_goal.flatten(),
+                sdc_velocity_xy.flatten(),
+                non_sdc_xy.flatten(),
+                non_sdc_vel_xy.flatten(),
+                roadgraph_points.flatten(),
+                roadgraph_points_types.flatten(),
             ],
             axis=-1,
         )
@@ -102,16 +104,12 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
     @override
     def observation_spec(self) -> types.Observation:
         return specs.BoundedArray(
-            shape=(6 + 2000 + 19000,),
+            shape=(4 * 128 + 2000 * 2 + 19 * 2000,),
             minimum=jnp.array(
-                [-jnp.inf, -jnp.inf, -1, -1, -jnp.inf, -jnp.inf]
-                + [-jnp.inf] * 2000
-                + [0] * 19000
+                [-jnp.inf] * 4 * 128 + [-jnp.inf] * 2000 * 2 + [0] * 19 * 2000
             ),
             maximum=jnp.array(
-                [jnp.inf, jnp.inf, 1, 1, jnp.inf, jnp.inf]
-                + [jnp.inf] * 2000
-                + [1] * 19000
+                [jnp.inf] * 4 * 128 + [jnp.inf] * 2000 * 2 + [1] * 19 * 2000
             ),
             dtype=jnp.float32,
         )
@@ -120,7 +118,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
 def setup_waymax():
     # path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
     path = "./data/training_tfexample.tfrecord@5"
-    max_num_objects = 32
+    max_num_objects = 128
     data_loader_config = dataclasses.replace(
         _config.WOD_1_1_0_TRAINING,
         path=path,
@@ -253,8 +251,11 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             return
 
         imgs = []
+        jit_observe = jit(datatypes.sdc_observation_from_state)
         for state in self._states:
-            imgs.append(visualization.plot_simulator_state(state, use_log_traj=False))
+            # observation = jit_observe(state)
+            # imgs.append(visualization.plot_observation(observation, 0))
+            imgs.append(visualization.plot_simulator_state(state))
         mediapy.write_video("./waymax.mp4", imgs, fps=10)
         self._states.clear()
 
@@ -324,7 +325,7 @@ env, data_iter = setup_waymax()
 env = WaymaxWrapper(env, data_iter)
 
 # instantiate a memory as rollout buffer (any memory can be used for this)
-mem_size = 64
+mem_size = 1024
 memory = RandomMemory(memory_size=mem_size, num_envs=1)
 
 
@@ -363,6 +364,6 @@ trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 trainer.train()
 
 # visualize the training
-trainer.timesteps = 1000
+trainer.timesteps = 10000
 trainer.headless = False
 trainer.eval()
