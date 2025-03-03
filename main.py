@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import mediapy
 import numpy as np
 import skrl.envs.wrappers.jax as skrl_wrappers
+import waymax.utils.geometry as utils
 from dm_env import specs
 from jax import jit
 from skrl import config
@@ -51,19 +52,67 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         """
         # Get base observation first
         observation = datatypes.sdc_observation_from_state(state)
-        ego_state = datatypes.select_by_onehot(
+        sdc_trajectory = datatypes.select_by_onehot(
             observation.trajectory,
             observation.is_ego,
         )
-        jax.debug.breakpoint()
-        return jnp.zeros((1,), dtype=jnp.float32)
+
+        sdc_yaw_cur = datatypes.select_by_onehot(
+            state.sim_trajectory.yaw[..., state.timestep],
+            state.object_metadata.is_sdc,
+            keepdims=False,
+        )
+        sdc_xy_end = datatypes.select_by_onehot(
+            state.log_trajectory.xy[..., -1, :],
+            state.object_metadata.is_sdc,
+            keepdims=True,
+        )
+        sdc_yaw_end = datatypes.select_by_onehot(
+            state.log_trajectory.yaw[..., -1],
+            state.object_metadata.is_sdc,
+            keepdims=True,
+        )
+        sdc_xy_end = utils.transform_points(observation.pose2d.matrix, sdc_xy_end)[0]
+
+        sdc_velocity_xy = sdc_trajectory.vel_xy[0][0]
+
+        heading_x = jnp.cos(sdc_yaw_cur)
+        heading_y = jnp.sin(sdc_yaw_cur)
+
+        roadgraph_points = observation.roadgraph_static_points.xy.reshape(2000)
+        types = observation.roadgraph_static_points.types
+        roadgraph_points_types = jax.nn.one_hot(types, num_classes=19).reshape(
+            1000 * 19
+        )
+
+        obs = jnp.concatenate(
+            [
+                sdc_xy_end,
+                sdc_velocity_xy,
+                jnp.stack([heading_x, heading_y], axis=-1),
+                roadgraph_points,
+                roadgraph_points_types,
+            ],
+            axis=-1,
+        )
+
+        # jax.debug.breakpoint()
+        return obs
 
     @override
     def observation_spec(self) -> types.Observation:
         return specs.BoundedArray(
-            shape=(1,),
-            minimum=jnp.array([0]),
-            maximum=jnp.array([1]),
+            shape=(6 + 2000 + 19000,),
+            minimum=jnp.array(
+                [-jnp.inf, -jnp.inf, -1, -1, -jnp.inf, -jnp.inf]
+                + [-jnp.inf] * 2000
+                + [0] * 19000
+            ),
+            maximum=jnp.array(
+                [jnp.inf, jnp.inf, 1, 1, jnp.inf, jnp.inf]
+                + [jnp.inf] * 2000
+                + [1] * 19000
+            ),
             dtype=jnp.float32,
         )
 
@@ -105,10 +154,10 @@ def merged_step(
 ):
     action = datatypes.Action(data=actions.flatten(), valid=jnp.ones((1,), dtype=bool))  # type: ignore
     new_state = env.step(state, action)
-    reward = env.reward(state, action).reshape(1, 1)
-    observation = env.observe(new_state).reshape(1, 1)
-    terminated = env.termination(new_state).reshape(1, 1)
-    truncated = env.truncation(new_state).reshape(1, 1)
+    reward = env.reward(state, action).reshape(1, -1)
+    observation = env.observe(new_state).reshape(1, -1)
+    terminated = env.termination(new_state).reshape(1, -1)
+    truncated = env.truncation(new_state).reshape(1, -1)
     return new_state, observation, reward, terminated, truncated
 
 
@@ -119,7 +168,7 @@ def merged_reset(
     env: _env.PlanningAgentEnvironment, scenario: datatypes.SimulatorState
 ):
     state = env.reset(scenario)
-    observation = env.observe(state).reshape(1, 1)
+    observation = env.observe(state).reshape(1, -1)
     return state, observation
 
 
@@ -149,7 +198,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         """
         scenario = next(self._scenario_loader)
         self._state, observation = merged_reset(self._env, scenario)
-        observation = np.array(observation).reshape(1, 1)
+        observation = np.array(observation).reshape(1, -1)
         return observation, {}
 
     @override
@@ -172,10 +221,10 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             self._env, self._state, actions  # type: ignore
         )
 
-        observation = np.array(observation).reshape(1, 1)
-        reward = np.array(reward).reshape(1, 1)
-        terminated = np.array(terminated).reshape(1, 1)
-        truncated = np.array(truncated).reshape(1, 1)
+        observation = np.array(observation).reshape(1, -1)
+        reward = np.array(reward).reshape(1, -1)
+        terminated = np.array(terminated).reshape(1, -1)
+        truncated = np.array(truncated).reshape(1, -1)
         return observation, reward, terminated, truncated, {}
 
     def state(self) -> Union[np.ndarray, jax.Array]:
@@ -205,7 +254,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
 
         imgs = []
         for state in self._states:
-            imgs.append(visualization.plot_simulator_state(state, use_log_traj=True))
+            imgs.append(visualization.plot_simulator_state(state, use_log_traj=False))
         mediapy.write_video("./waymax.mp4", imgs, fps=10)
         self._states.clear()
 
@@ -307,12 +356,13 @@ agent = PPO(
 
 
 # configure and instantiate the RL trainer
-cfg_trainer = {"timesteps": 1000, "headless": True, "close_environment_at_exit": True}
+cfg_trainer = {"timesteps": 100000, "headless": True}
 trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
 # start training
 trainer.train()
 
 # visualize the training
-trainer.headless = True
+trainer.timesteps = 1000
+trainer.headless = False
 trainer.eval()
