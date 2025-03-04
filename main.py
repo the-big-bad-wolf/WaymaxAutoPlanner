@@ -152,7 +152,7 @@ def setup_waymax():
     env_config = dataclasses.replace(
         _config.EnvironmentConfig(),
         metrics=metrics_config,
-        reward=reward_config,
+        rewards=reward_config,
         max_num_objects=max_num_objects,
         sim_agents=[sim_agent_config],
     )
