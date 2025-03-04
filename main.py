@@ -306,10 +306,10 @@ class Policy(GaussianMixin, Model):
         observation_space,
         action_space,
         device=None,
-        clip_actions=False,
+        clip_actions=True,
         clip_log_std=True,
         min_log_std=-20,
-        max_log_std=2,
+        max_log_std=1,
         reduction="sum",
         **kwargs
     ):
@@ -320,8 +320,8 @@ class Policy(GaussianMixin, Model):
 
     @nn.compact  # marks the given module method allowing inlined submodules
     def __call__(self, inputs, role):
-        x = nn.relu(nn.Dense(64)(inputs["states"]))
-        x = nn.relu(nn.Dense(64)(x))
+        x = nn.relu(nn.Dense(128)(inputs["states"]))
+        x = nn.relu(nn.Dense(128)(x))
         x = nn.Dense(self.num_actions)(x)  # type: ignore
         log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
         return nn.tanh(x), log_std, {}
@@ -336,8 +336,8 @@ class Value(DeterministicMixin, Model):
 
     @nn.compact  # marks the given module method allowing inlined submodules
     def __call__(self, inputs, role):
-        x = nn.relu(nn.Dense(64)(inputs["states"]))
-        x = nn.relu(nn.Dense(64)(x))
+        x = nn.relu(nn.Dense(128)(inputs["states"]))
+        x = nn.relu(nn.Dense(128)(x))
         x = nn.Dense(1)(x)
         return x, {}
 
@@ -378,7 +378,7 @@ agent = PPO(
 
 
 # configure and instantiate the RL trainer
-cfg_trainer = {"timesteps": 50000, "headless": True}
+cfg_trainer = {"timesteps": 100000, "headless": True}
 trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
 # start training
@@ -386,8 +386,8 @@ trainer.train()
 
 
 # load the latest checkpoint (adjust the path as needed)
-# agent.load("./runs/25-03-04_03-52-30-331026_PPO/checkpoints/best_agent.pickle")
+# agent.load("./runs/25-03-04_13-14-37-847444_PPO/checkpoints/best_agent.pickle")
 # visualize the training
-trainer.timesteps = 10000
+trainer.timesteps = 1000
 trainer.headless = False
 trainer.eval()
