@@ -115,7 +115,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             axis=-1,
         )
 
-        jax.debug.breakpoint()
+        # jax.debug.breakpoint()
         return obs
 
     @override
@@ -145,8 +145,14 @@ def setup_waymax():
         agent_type=_config.SimAgentType.IDM,
         controlled_objects=_config.ObjectType.NON_SDC,
     )
+    metrics_config = _config.MetricsConfig(metrics_to_run=("log_divergence",))
+    reward_config = _config.LinearCombinationRewardConfig(
+        rewards={"log_divergence": 1.0}
+    )
     env_config = dataclasses.replace(
         _config.EnvironmentConfig(),
+        metrics=metrics_config,
+        reward=reward_config,
         max_num_objects=max_num_objects,
         sim_agents=[sim_agent_config],
     )
@@ -270,7 +276,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         for state in self._states:
             # observation = jit_observe(state)
             # imgs.append(visualization.plot_observation(observation, 0))
-            imgs.append(visualization.plot_simulator_state(state))
+            imgs.append(visualization.plot_simulator_state(state, use_log_traj=False))
         mediapy.write_video("./waymax.mp4", imgs, fps=10)
         self._states.clear()
 
@@ -372,12 +378,15 @@ agent = PPO(
 
 
 # configure and instantiate the RL trainer
-cfg_trainer = {"timesteps": 100000, "headless": True}
+cfg_trainer = {"timesteps": 50000, "headless": True}
 trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
 # start training
 trainer.train()
 
+
+# load the latest checkpoint (adjust the path as needed)
+# agent.load("./runs/25-03-04_03-52-30-331026_PPO/checkpoints/best_agent.pickle")
 # visualize the training
 trainer.timesteps = 10000
 trainer.headless = False
