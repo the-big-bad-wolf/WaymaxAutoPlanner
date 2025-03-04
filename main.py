@@ -87,15 +87,23 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         # Set velocities of invalid objects to 0
         non_sdc_vel_xy = non_sdc_vel_xy * non_sdc_valid
 
-        roadgraph_points = observation.roadgraph_static_points.xy
+        roadgraph_x = observation.roadgraph_static_points.x
+        roadgraph_y = observation.roadgraph_static_points.y
         roadgraph_points_types = jax.nn.one_hot(
             observation.roadgraph_static_points.types, num_classes=20
         )
 
         # Set position of invalid roadgraph points to 10000
-        roadgraph_points = (
-            roadgraph_points * observation.roadgraph_static_points.valid
+        roadgraph_x = (
+            roadgraph_x * observation.roadgraph_static_points.valid
             + (1 - observation.roadgraph_static_points.valid) * 10000
+        )
+        roadgraph_y = (
+            roadgraph_y * observation.roadgraph_static_points.valid
+            + (1 - observation.roadgraph_static_points.valid) * 10000
+        )
+        roadgraph_points = jnp.stack([roadgraph_x, roadgraph_y], axis=-1).reshape(
+            2000, 2
         )
 
         obs = jnp.concatenate(
@@ -110,13 +118,13 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             axis=-1,
         )
 
-        # jax.debug.breakpoint()
+        jax.debug.breakpoint()
         return obs
 
     @override
     def observation_spec(self) -> types.Observation:
         return specs.BoundedArray(
-            shape=(4 * 128 + 2000 * 2 + 19 * 2000,),
+            shape=(4 * 128 + 2000 * 2 + 20 * 2000,),
             minimum=jnp.array(
                 [-10000] * 4 * 128 + [-10000] * 2000 * 2 + [0] * 20 * 2000
             ),
