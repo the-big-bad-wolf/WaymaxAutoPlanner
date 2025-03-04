@@ -77,15 +77,27 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         non_sdc_vel_xy = jnp.delete(
             observation.trajectory.vel_xy, sdc_idx, axis=1, assume_unique_indices=True
         ).reshape(127, 2)
-
         non_sdc_valid = jnp.delete(
             observation.trajectory.valid, sdc_idx, axis=1, assume_unique_indices=True
         ).reshape(127, 1)
 
+        # Set positions of invalid objects to 10000
+        non_sdc_xy = non_sdc_xy * non_sdc_valid + (1 - non_sdc_valid) * 10000
+
+        # Set velocities of invalid objects to 0
+        non_sdc_vel_xy = non_sdc_vel_xy * non_sdc_valid
+
         roadgraph_points = observation.roadgraph_static_points.xy
         roadgraph_points_types = jax.nn.one_hot(
-            observation.roadgraph_static_points.types, num_classes=19
+            observation.roadgraph_static_points.types, num_classes=20
         )
+
+        # Set position of invalid roadgraph points to 10000
+        roadgraph_points = (
+            roadgraph_points * observation.roadgraph_static_points.valid
+            + (1 - observation.roadgraph_static_points.valid) * 10000
+        )
+
         obs = jnp.concatenate(
             [
                 sdc_xy_goal.flatten(),
@@ -106,11 +118,9 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         return specs.BoundedArray(
             shape=(4 * 128 + 2000 * 2 + 19 * 2000,),
             minimum=jnp.array(
-                [-jnp.inf] * 4 * 128 + [-jnp.inf] * 2000 * 2 + [0] * 19 * 2000
+                [-10000] * 4 * 128 + [-10000] * 2000 * 2 + [0] * 20 * 2000
             ),
-            maximum=jnp.array(
-                [jnp.inf] * 4 * 128 + [jnp.inf] * 2000 * 2 + [1] * 19 * 2000
-            ),
+            maximum=jnp.array([10000] * 4 * 128 + [10000] * 2000 * 2 + [1] * 20 * 2000),
             dtype=jnp.float32,
         )
 
