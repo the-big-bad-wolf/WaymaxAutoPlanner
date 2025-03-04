@@ -96,12 +96,9 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         # Set position of invalid roadgraph points to 10000
         roadgraph_x = (
             roadgraph_x * observation.roadgraph_static_points.valid
-            + (1 - observation.roadgraph_static_points.valid) * 10000
+            - (1 - observation.roadgraph_static_points.valid) * 10000
         )
-        roadgraph_y = (
-            roadgraph_y * observation.roadgraph_static_points.valid
-            + (1 - observation.roadgraph_static_points.valid) * 10000
-        )
+        roadgraph_y = roadgraph_y * observation.roadgraph_static_points.valid
         roadgraph_points = jnp.stack([roadgraph_x, roadgraph_y], axis=-1).reshape(
             2000, 2
         )
