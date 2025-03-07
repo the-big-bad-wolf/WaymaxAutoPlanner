@@ -28,6 +28,64 @@ config.jax.backend = "numpy"
 config.jax.device = jax.devices("cpu")[0]
 
 
+def find_closest_distance(
+    i,
+    initval: Tuple[jax.Array, datatypes.RoadgraphPoints, jax.Array, int, jax.Array],
+):
+    distances, rg_points, rg_angles, num_rays, ray_angles = initval
+    ray_angle = ray_angles[i]
+
+    # Calculate angle difference and normalize to [-pi, pi]
+    angle_diff = rg_angles - ray_angle
+    angle_diff = (angle_diff + jnp.pi) % (2 * jnp.pi) - jnp.pi
+
+    # Only consider points roughly in the ray direction (within tolerance)
+    angle_tolerance = jnp.pi / num_rays
+    candidate_points = jnp.abs(angle_diff) < angle_tolerance
+
+    # Only consider valid points
+    candidate_points = candidate_points & rg_points.valid
+
+    # Only consider boundary points
+    candidate_points = candidate_points & (
+        (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_BOUNDARY)
+        | (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_MEDIAN)
+        | (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_UNKNOWN)
+    )
+
+    # If no valid points, return the default distance
+    has_valid = jnp.any(candidate_points)
+
+    # Calculate distances to all valid points
+    point_distances = jnp.sqrt(rg_points.x**2 + rg_points.y**2)
+    masked_distances = jnp.where(candidate_points, point_distances, 100.0)
+
+    # Find minimum distance among valid points
+    min_distance = jnp.min(masked_distances)
+
+    # Update only the i-th element and return the whole array
+    new_distances = distances.at[i].set(
+        jnp.where(has_valid, min_distance, distances[i])
+    )
+    return new_distances, rg_points, rg_angles, num_rays, ray_angles
+
+
+def create_circogram(observation: datatypes.Observation, num_rays: int):
+    rg_points = observation.roadgraph_static_points
+    rg_angles = jnp.arctan2(rg_points.x, rg_points.y)
+    ray_angles = jnp.linspace(-jnp.pi, jnp.pi, num_rays, endpoint=False)
+
+    # For each ray angle, find the closest roadgraph point
+    circogram = jnp.full(num_rays, 100.0)  # Default max distance
+    circogram, _, _, _, _ = jax.lax.fori_loop(
+        0,
+        num_rays,
+        find_closest_distance,
+        (circogram, rg_points, rg_angles, num_rays, ray_angles),
+    )
+    return circogram
+
+
 class WaymaxEnv(_env.PlanningAgentEnvironment):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -87,54 +145,9 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         # Set velocities of invalid objects to 0
         non_sdc_vel_xy = non_sdc_vel_xy * non_sdc_valid
 
-        rg_points = observation.roadgraph_static_points
-        rg_angles = jnp.arctan2(rg_points.x, rg_points.y)
-        num_rays = 60
-        ray_angles = jnp.linspace(-jnp.pi, jnp.pi, num_rays)
-
+        num_rays = 24
         # For each ray angle, find the closest roadgraph point
-        closest_distances = jnp.full(num_rays, 100.0)  # Default large distance
-
-        def find_closest_distance(i, distances):
-            ray_angle = ray_angles[i]
-
-            # Calculate angle difference and normalize to [-pi, pi]
-            angle_diff = rg_angles - ray_angle
-            angle_diff = (angle_diff + jnp.pi) % (2 * jnp.pi) - jnp.pi
-
-            # Only consider points roughly in the ray direction (within tolerance)
-            angle_tolerance = jnp.pi / num_rays
-            candidate_points = jnp.abs(angle_diff) < angle_tolerance
-
-            # Only consider valid points
-            candidate_points = candidate_points & rg_points.valid
-
-            # Only consider boundary points
-            candidate_points = candidate_points & (
-                (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_BOUNDARY)
-                | (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_MEDIAN)
-                | (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_UNKNOWN)
-            )
-
-            # If no valid points, return the default distance
-            has_valid = jnp.any(candidate_points)
-
-            # Calculate distances to all valid points
-            point_distances = jnp.sqrt(rg_points.x**2 + rg_points.y**2)
-            masked_distances = jnp.where(candidate_points, point_distances, 100.0)
-
-            # Find minimum distance among valid points
-            min_distance = jnp.min(masked_distances)
-
-            # Update only the i-th element and return the whole array
-            new_distances = distances.at[i].set(
-                jnp.where(has_valid, min_distance, distances[i])
-            )
-            return new_distances
-
-        closest_distances = jax.lax.fori_loop(
-            0, num_rays, find_closest_distance, closest_distances
-        )
+        circogram = create_circogram(observation, num_rays)
 
         obs = jnp.concatenate(
             [
