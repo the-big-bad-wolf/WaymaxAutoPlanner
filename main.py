@@ -51,7 +51,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
           Simulator state as an observation without modifications of shape (...).
         """
         # Get base observation first
-        observation = datatypes.sdc_observation_from_state(state, roadgraph_top_k=2000)
+        observation = datatypes.sdc_observation_from_state(state, roadgraph_top_k=1000)
 
         sdc_trajectory = datatypes.select_by_onehot(
             observation.trajectory,
@@ -87,30 +87,59 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         # Set velocities of invalid objects to 0
         non_sdc_vel_xy = non_sdc_vel_xy * non_sdc_valid
 
-        roadgraph_x = observation.roadgraph_static_points.x
-        roadgraph_y = observation.roadgraph_static_points.y
-        roadgraph_points_types = jax.nn.one_hot(
-            observation.roadgraph_static_points.types, num_classes=20
-        )
+        rg_points = observation.roadgraph_static_points
+        rg_angles = jnp.arctan2(rg_points.x, rg_points.y)
+        num_rays = 60
+        ray_angles = jnp.linspace(-jnp.pi, jnp.pi, num_rays)
 
-        # Set position of invalid roadgraph points to 10000
-        roadgraph_x = (
-            roadgraph_x * observation.roadgraph_static_points.valid
-            - (1 - observation.roadgraph_static_points.valid) * 10000
-        )
-        roadgraph_y = roadgraph_y * observation.roadgraph_static_points.valid
-        roadgraph_points = jnp.stack([roadgraph_x, roadgraph_y], axis=-1).reshape(
-            2000, 2
+        # For each ray angle, find the closest roadgraph point
+        closest_distances = jnp.full(num_rays, 100.0)  # Default large distance
+
+        def find_closest_distance(i, distances):
+            ray_angle = ray_angles[i]
+
+            # Calculate angle difference and normalize to [-pi, pi]
+            angle_diff = rg_angles - ray_angle
+            angle_diff = (angle_diff + jnp.pi) % (2 * jnp.pi) - jnp.pi
+
+            # Only consider points roughly in the ray direction (within tolerance)
+            angle_tolerance = jnp.pi / num_rays
+            candidate_points = jnp.abs(angle_diff) < angle_tolerance
+
+            # Only consider valid points
+            candidate_points = candidate_points & rg_points.valid
+
+            # Only consider boundary points
+            candidate_points = candidate_points & (
+                (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_BOUNDARY)
+                | (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_MEDIAN)
+                | (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_UNKNOWN)
+            )
+
+            # If no valid points, return the default distance
+            has_valid = jnp.any(candidate_points)
+
+            # Calculate distances to all valid points
+            point_distances = jnp.sqrt(rg_points.x**2 + rg_points.y**2)
+            masked_distances = jnp.where(candidate_points, point_distances, 100.0)
+
+            # Find minimum distance among valid points
+            min_distance = jnp.min(masked_distances)
+
+            # Update only the i-th element and return the whole array
+            new_distances = distances.at[i].set(
+                jnp.where(has_valid, min_distance, distances[i])
+            )
+            return new_distances
+
+        closest_distances = jax.lax.fori_loop(
+            0, num_rays, find_closest_distance, closest_distances
         )
 
         obs = jnp.concatenate(
             [
                 sdc_xy_goal.flatten(),
                 sdc_velocity_xy.flatten(),
-                non_sdc_xy.flatten(),
-                non_sdc_vel_xy.flatten(),
-                roadgraph_points.flatten(),
-                roadgraph_points_types.flatten(),
             ],
             axis=-1,
         )
@@ -121,11 +150,9 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
     @override
     def observation_spec(self) -> types.Observation:
         return specs.BoundedArray(
-            shape=(4 * 128 + 2000 * 2 + 20 * 2000,),
-            minimum=jnp.array(
-                [-10000] * 4 * 128 + [-10000] * 2000 * 2 + [0] * 20 * 2000
-            ),
-            maximum=jnp.array([10000] * 4 * 128 + [10000] * 2000 * 2 + [1] * 20 * 2000),
+            shape=(4,),
+            minimum=jnp.array([-100] * 2 + [-30] * 2),  # Ingen y fart????
+            maximum=jnp.array([100] * 2 + [30] * 2),
             dtype=jnp.float32,
         )
 
@@ -147,7 +174,7 @@ def setup_waymax():
     )
     metrics_config = _config.MetricsConfig(metrics_to_run=("log_divergence",))
     reward_config = _config.LinearCombinationRewardConfig(
-        rewards={"log_divergence": 1.0}
+        rewards={"log_divergence": -1.0}
     )
     env_config = dataclasses.replace(
         _config.EnvironmentConfig(),
@@ -320,8 +347,8 @@ class Policy(GaussianMixin, Model):
 
     @nn.compact  # marks the given module method allowing inlined submodules
     def __call__(self, inputs, role):
-        x = nn.relu(nn.Dense(128)(inputs["states"]))
-        x = nn.relu(nn.Dense(128)(x))
+        x = nn.relu(nn.Dense(10)(inputs["states"]))
+        x = nn.relu(nn.Dense(10)(x))
         x = nn.Dense(self.num_actions)(x)  # type: ignore
         log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
         return nn.tanh(x), log_std, {}
@@ -336,8 +363,8 @@ class Value(DeterministicMixin, Model):
 
     @nn.compact  # marks the given module method allowing inlined submodules
     def __call__(self, inputs, role):
-        x = nn.relu(nn.Dense(128)(inputs["states"]))
-        x = nn.relu(nn.Dense(128)(x))
+        x = nn.relu(nn.Dense(10)(inputs["states"]))
+        x = nn.relu(nn.Dense(10)(x))
         x = nn.Dense(1)(x)
         return x, {}
 
@@ -346,7 +373,7 @@ env, data_iter = setup_waymax()
 env = WaymaxWrapper(env, data_iter)
 
 # instantiate a memory as rollout buffer (any memory can be used for this)
-mem_size = 1024
+mem_size = 4096
 memory = RandomMemory(memory_size=mem_size, num_envs=1)
 
 
@@ -378,7 +405,7 @@ agent = PPO(
 
 
 # configure and instantiate the RL trainer
-cfg_trainer = {"timesteps": 100000, "headless": True}
+cfg_trainer = {"timesteps": 200000, "headless": True}
 trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
 # start training
