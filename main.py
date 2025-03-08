@@ -29,7 +29,7 @@ config.jax.device = jax.devices("cpu")[0]
 
 
 def ray_segment_intersection(
-    ray_angle: jax.Array, start_points: jax.Array, end_points: jax.Array
+    ray_angle: jax.Array, start_points: jax.Array, segment_dirs: jax.Array
 ) -> jax.Array:
     """
     Calculate the intersection distances between a ray and line segments.
@@ -37,7 +37,7 @@ def ray_segment_intersection(
     Args:
         ray_angle: The angle of the ray (in radians).
         start_points: Array of shape (N, 2) for segment start points (x,y).
-        end_points: Array of shape (N, 2) for segment end points (x,y).
+        segment_dirs: Array of shape (N, 2) for segment directions (dx, dy).
 
     Returns:
         Array of distances from origin to intersections. Returns 100.0 if no intersection.
@@ -46,9 +46,9 @@ def ray_segment_intersection(
     ray_dir_x = jnp.sin(ray_angle)
     ray_dir_y = jnp.cos(ray_angle)
 
-    # Calculate segment direction and length
-    segment_dir_x = end_points[:, 0] - start_points[:, 0]
-    segment_dir_y = end_points[:, 1] - start_points[:, 1]
+    # Calculate segment direction
+    segment_dir_x = segment_dirs[:, 0]
+    segment_dir_y = segment_dirs[:, 1]
 
     # Calculate determinant for intersection test
     det = segment_dir_x * ray_dir_y - segment_dir_y * ray_dir_x
@@ -74,6 +74,9 @@ def ray_segment_intersection(
 
     # Distance from origin to intersection point
     distances = jnp.sqrt(ix**2 + iy**2)
+
+    # Make sure distances over 100 are not valid
+    valid_intersection = valid_intersection & (distances < 100.0)
 
     # Return distance if valid intersection, otherwise 100.0
     return jnp.where(valid_intersection, distances, 100.0)
@@ -101,11 +104,10 @@ def find_closest_distance(
     # Create line segments from roadgraph points
     starting_points = jnp.stack([rg_points.x, rg_points.y], axis=1)
     dir_xy = jnp.stack([rg_points.dir_x, rg_points.dir_y], axis=1)
-    end_points = starting_points + dir_xy
 
     # Calculate intersection distances
     intersection_distances = ray_segment_intersection(
-        ray_angle, starting_points, end_points
+        ray_angle, starting_points, dir_xy
     )
     masked_distances = jnp.where(candidate_points, intersection_distances, 100.0)
 
