@@ -203,6 +203,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             [
                 sdc_xy_goal.flatten(),
                 sdc_velocity_xy.flatten(),
+                circogram.flatten(),
             ],
             axis=-1,
         )
@@ -212,10 +213,36 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
 
     @override
     def observation_spec(self) -> types.Observation:
+        """Returns the observation spec of the environment.
+        Returns:
+            Observation spec of the environment.
+        """
+        # Define dimensions for each observation component
+        sdc_goal_dim = 2
+        sdc_vel_dim = 2
+        circogram_dim = 64
+
+        # Total shape is the sum of all component dimensions
+        total_dim = sdc_goal_dim + sdc_vel_dim + circogram_dim
+
+        # Define min/max bounds for each component
+        sdc_goal_min = [-1000] * sdc_goal_dim
+        sdc_goal_max = [1000] * sdc_goal_dim
+
+        sdc_vel_min = [-30] * sdc_vel_dim
+        sdc_vel_max = [30] * sdc_vel_dim
+
+        circogram_min = [0] * circogram_dim
+        circogram_max = [100] * circogram_dim
+
+        # Combine all bounds
+        min_bounds = jnp.array(sdc_goal_min + sdc_vel_min + circogram_min)
+        max_bounds = jnp.array(sdc_goal_max + sdc_vel_max + circogram_max)
+
         return specs.BoundedArray(
-            shape=(4,),
-            minimum=jnp.array([-100] * 2 + [-30] * 2),  # Ingen y fart????
-            maximum=jnp.array([100] * 2 + [30] * 2),
+            shape=(total_dim,),
+            minimum=min_bounds,
+            maximum=max_bounds,
             dtype=jnp.float32,
         )
 
