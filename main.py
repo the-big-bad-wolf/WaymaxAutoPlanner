@@ -28,25 +28,67 @@ config.jax.backend = "numpy"
 config.jax.device = jax.devices("cpu")[0]
 
 
+def ray_segment_intersection(
+    ray_angle: jax.Array, start_points: jax.Array, end_points: jax.Array
+) -> jax.Array:
+    """
+    Calculate the intersection distances between a ray and line segments.
+
+    Args:
+        ray_angle: The angle of the ray (in radians).
+        start_points: Array of shape (N, 2) for segment start points (x,y).
+        end_points: Array of shape (N, 2) for segment end points (x,y).
+
+    Returns:
+        Array of distances from origin to intersections. Returns 100.0 if no intersection.
+    """
+    # Calculate ray direction
+    ray_dir_x = jnp.sin(ray_angle)
+    ray_dir_y = jnp.cos(ray_angle)
+
+    # Calculate segment direction and length
+    segment_dir_x = end_points[:, 0] - start_points[:, 0]
+    segment_dir_y = end_points[:, 1] - start_points[:, 1]
+
+    # Calculate determinant for intersection test
+    det = segment_dir_x * ray_dir_y - segment_dir_y * ray_dir_x
+
+    # Avoid division by zero for parallel lines
+    is_parallel = jnp.abs(det) < 1e-8
+    det = jnp.where(is_parallel, 1.0, det)  # Avoid division by zero
+
+    # Calculate t1 and t2 parameters
+    t1 = (start_points[:, 0] * ray_dir_y - start_points[:, 1] * ray_dir_x) / det
+    t2 = (start_points[:, 0] * segment_dir_y - start_points[:, 1] * segment_dir_x) / det
+
+    # Check if intersection is within segment (0 <= t1 <= 1) and ray (t2 >= 0)
+    valid_t1 = (t1 >= 0.0) & (t1 <= 1.0)
+    valid_t2 = t2 >= 0.0
+
+    # Combine intersection validity checks
+    valid_intersection = valid_t1 & valid_t2 & ~is_parallel
+
+    # Calculate intersection points and distances
+    ix = start_points[:, 0] + t1 * segment_dir_x
+    iy = start_points[:, 1] + t1 * segment_dir_y
+
+    # Distance from origin to intersection point
+    distances = jnp.sqrt(ix**2 + iy**2)
+
+    # Return distance if valid intersection, otherwise 100.0
+    return jnp.where(valid_intersection, distances, 100.0)
+
+
 def find_closest_distance(
-    i,
-    initval: Tuple[jax.Array, datatypes.RoadgraphPoints, jax.Array, int, jax.Array],
+    i, initval: Tuple[jax.Array, datatypes.RoadgraphPoints, jax.Array]
 ):
-    distances, rg_points, rg_angles, num_rays, ray_angles = initval
+    circogram, rg_points, ray_angles = initval
     ray_angle = ray_angles[i]
 
-    # Calculate angle difference and normalize to [-pi, pi]
-    angle_diff = rg_angles - ray_angle
-    angle_diff = (angle_diff + jnp.pi) % (2 * jnp.pi) - jnp.pi
-
-    # Only consider points roughly in the ray direction (within tolerance)
-    angle_tolerance = jnp.pi / num_rays
-    candidate_points = jnp.abs(angle_diff) < angle_tolerance
-
     # Only consider valid points
-    candidate_points = candidate_points & rg_points.valid
+    candidate_points = rg_points.valid
 
-    # Only consider boundary points
+    # Only consider road edge points
     candidate_points = candidate_points & (
         (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_BOUNDARY)
         | (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_MEDIAN)
@@ -56,32 +98,39 @@ def find_closest_distance(
     # If no valid points, return the default distance
     has_valid = jnp.any(candidate_points)
 
-    # Calculate distances to all valid points
-    point_distances = jnp.sqrt(rg_points.x**2 + rg_points.y**2)
-    masked_distances = jnp.where(candidate_points, point_distances, 100.0)
+    # Create line segments from roadgraph points
+    starting_points = jnp.stack([rg_points.x, rg_points.y], axis=1)
+    dir_xy = jnp.stack([rg_points.dir_x, rg_points.dir_y], axis=1)
+    end_points = starting_points + dir_xy
+
+    # Calculate intersection distances
+    intersection_distances = ray_segment_intersection(
+        ray_angle, starting_points, end_points
+    )
+    masked_distances = jnp.where(candidate_points, intersection_distances, 100.0)
 
     # Find minimum distance among valid points
     min_distance = jnp.min(masked_distances)
 
     # Update only the i-th element and return the whole array
-    new_distances = distances.at[i].set(
-        jnp.where(has_valid, min_distance, distances[i])
-    )
-    return new_distances, rg_points, rg_angles, num_rays, ray_angles
+    circogram = circogram.at[i].set(jnp.where(has_valid, min_distance, circogram[i]))
+    return circogram, rg_points, ray_angles
 
 
-def create_circogram(observation: datatypes.Observation, num_rays: int):
+def create_circogram(observation: datatypes.Observation, num_rays: int) -> jax.Array:
+    ray_angles = jnp.linspace(0, 2 * jnp.pi, num_rays, endpoint=False)
     rg_points = observation.roadgraph_static_points
-    rg_angles = jnp.arctan2(rg_points.x, rg_points.y)
-    ray_angles = jnp.linspace(-jnp.pi, jnp.pi, num_rays, endpoint=False)
-
-    # For each ray angle, find the closest roadgraph point
+    # For each ray angle, find the closest intersection
     circogram = jnp.full(num_rays, 100.0)  # Default max distance
-    circogram, _, _, _, _ = jax.lax.fori_loop(
+    (
+        circogram,
+        _,
+        _,
+    ) = jax.lax.fori_loop(
         0,
         num_rays,
         find_closest_distance,
-        (circogram, rg_points, rg_angles, num_rays, ray_angles),
+        (circogram, rg_points, ray_angles),
     )
     return circogram
 
@@ -145,8 +194,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         # Set velocities of invalid objects to 0
         non_sdc_vel_xy = non_sdc_vel_xy * non_sdc_valid
 
-        num_rays = 24
-        # For each ray angle, find the closest roadgraph point
+        num_rays = 64
         circogram = create_circogram(observation, num_rays)
 
         obs = jnp.concatenate(
