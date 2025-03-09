@@ -36,9 +36,11 @@ def setup_waymax():
         controlled_objects=_config.ObjectType.NON_SDC,
     )
     print("Available metrics:", metrics.get_metric_names())
-    metrics_config = _config.MetricsConfig(metrics_to_run=("sdc_progression",))
+    metrics_config = _config.MetricsConfig(
+        metrics_to_run=("sdc_progression", "offroad")
+    )
     reward_config = _config.LinearCombinationRewardConfig(
-        rewards={"sdc_progression": 1.0},
+        rewards={"sdc_progression": 100.0, "offroad": -1.0},
     )
     env_config = dataclasses.replace(
         _config.EnvironmentConfig(),
@@ -66,7 +68,7 @@ class Policy(GaussianMixin, Model):
         clip_actions=True,
         clip_log_std=True,
         min_log_std=-20,
-        max_log_std=1,
+        max_log_std=2,
         reduction="sum",
         **kwargs
     ):
@@ -77,8 +79,8 @@ class Policy(GaussianMixin, Model):
 
     @nn.compact  # marks the given module method allowing inlined submodules
     def __call__(self, inputs, role):
-        x = nn.relu(nn.Dense(10)(inputs["states"]))
-        x = nn.relu(nn.Dense(10)(x))
+        x = nn.relu(nn.Dense(64)(inputs["states"]))
+        x = nn.relu(nn.Dense(64)(x))
         x = nn.Dense(self.num_actions)(x)  # type: ignore
         log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
         return nn.tanh(x), log_std, {}
@@ -93,8 +95,8 @@ class Value(DeterministicMixin, Model):
 
     @nn.compact  # marks the given module method allowing inlined submodules
     def __call__(self, inputs, role):
-        x = nn.relu(nn.Dense(10)(inputs["states"]))
-        x = nn.relu(nn.Dense(10)(x))
+        x = nn.relu(nn.Dense(64)(inputs["states"]))
+        x = nn.relu(nn.Dense(64)(x))
         x = nn.Dense(1)(x)
         return x, {}
 
@@ -104,7 +106,7 @@ if __name__ == "__main__":
     env = WaymaxWrapper(env, data_iter)
 
     # instantiate a memory as rollout buffer (any memory can be used for this)
-    mem_size = 4096
+    mem_size = 8192
     memory = RandomMemory(memory_size=mem_size, num_envs=1)
 
     # instantiate the agent's models (function approximators).
@@ -132,7 +134,7 @@ if __name__ == "__main__":
     )
 
     # configure and instantiate the RL trainer
-    cfg_trainer = {"timesteps": 500000, "headless": True}
+    cfg_trainer = {"timesteps": 190000, "headless": True}
     trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
     # start training
