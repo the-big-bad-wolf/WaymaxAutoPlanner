@@ -25,25 +25,32 @@ def construct_SDC_route(
         The updated simulator state with the SDC route.
     """
     # Calculate arc lengths (cumulative distances along the trajectory)
+    # Select sdc trajectory
+    sdc_trajectory = datatypes.select_by_onehot(
+        state.log_trajectory,
+        state.object_metadata.is_sdc,
+        keepdims=True,
+    )
+
     # Calculate differences between consecutive points
-    dx = jnp.diff(state.log_trajectory.x, axis=-1)
-    dy = jnp.diff(state.log_trajectory.y, axis=-1)
+    dx = jnp.diff(sdc_trajectory.x, axis=-1)
+    dy = jnp.diff(sdc_trajectory.y, axis=-1)
 
     # Calculate Euclidean distance for each step
     step_distances = jnp.sqrt(dx**2 + dy**2)
 
     # Calculate cumulative distances
-    arc_lengths = jnp.zeros_like(state.log_trajectory.x)
+    arc_lengths = jnp.zeros_like(sdc_trajectory.x)
     arc_lengths = arc_lengths.at[..., 1:].set(jnp.cumsum(step_distances, axis=-1))
 
     logged_route = datatypes.Paths(
-        x=state.log_trajectory.x,
-        y=state.log_trajectory.y,
-        z=state.log_trajectory.z,
-        valid=state.log_trajectory.valid,
+        x=sdc_trajectory.x,
+        y=sdc_trajectory.y,
+        z=sdc_trajectory.z,
+        valid=sdc_trajectory.valid,
         arc_length=arc_lengths,
         on_route=jnp.array([[True]]),
-        ids=jnp.array([[0] * len(state.log_trajectory.x)]),  # Dummy ID
+        ids=jnp.array([[0] * len(sdc_trajectory.x)]),  # Dummy ID
     )
     return dataclasses.replace(
         state,
