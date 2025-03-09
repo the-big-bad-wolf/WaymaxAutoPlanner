@@ -13,6 +13,7 @@ from jax import jit
 from waymax import datatypes
 from waymax import env as _env
 from waymax import visualization
+import cv2
 
 
 def construct_SDC_route(
@@ -96,8 +97,11 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         super().__init__(env)
         self._env: _env.PlanningAgentEnvironment
         self._scenario_loader = scenario_loader
-        self._states: List[_env.PlanningAgentSimulatorState] = []  # For rendering
         self._state: _env.PlanningAgentSimulatorState | None = None
+        self._reward: float | None = None
+
+        self._states: List[_env.PlanningAgentSimulatorState] = []  # For rendering
+        self._rewards: List[float] = []  # For rendering
 
     @override
     def reset(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
@@ -130,11 +134,12 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         self._state, observation, reward, terminated, truncated = merged_step(
             self._env, self._state, actions  # type: ignore
         )
-
         observation = np.array(observation).reshape(1, -1)
         reward = np.array(reward).reshape(1, -1)
         terminated = np.array(terminated).reshape(1, -1)
         truncated = np.array(truncated).reshape(1, -1)
+
+        self._reward = reward[0, 0]
         return observation, reward, terminated, truncated, {}
 
     def state(self) -> Union[np.ndarray, jax.Array]:
@@ -151,6 +156,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
     def render(self, *args, **kwargs) -> Any:
         """Store the state for video generation on close"""
         self._states.append(self._state)  # type: ignore
+        self._rewards.append(self._reward)  # type: ignore
 
     @override
     def close(self) -> None:
@@ -160,10 +166,45 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
 
         imgs = []
         jit_observe = jit(datatypes.sdc_observation_from_state)
-        for state in self._states:
+        for i in range(len(self._states)):
             # observation = jit_observe(state)
             # imgs.append(visualization.plot_observation(observation, 0))
-            imgs.append(visualization.plot_simulator_state(state, use_log_traj=False))
+            img = visualization.plot_simulator_state(
+                self._states[i], use_log_traj=False
+            )
+            # Add reward text overlay to the bottom left cornerstate
+            # Format the reward text
+            reward_text = f"Reward: {self._rewards[i]:.4f}"
+            # Create a copy to avoid modifying the original
+            img_with_text = img.copy()
+            # Get image dimensions
+            h, w = img_with_text.shape[:2]
+            # Draw a semi-transparent black box at the bottom left
+            overlay = img_with_text.copy()
+
+            # Draw a semi-transparent black box at the bottom right
+            text_size = cv2.getTextSize(reward_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[
+                0
+            ]
+            text_width = text_size[0] + 10  # Add padding
+            pt1 = (w - text_width - 10, h - 40)  # Top-left corner of the box
+            pt2 = (w - 10, h - 10)  # Bottom-right corner of the box
+            cv2.rectangle(overlay, pt1, pt2, (0, 0, 0), -1)  # Black filled rectangle
+            alpha = 0.7  # Transparency factor
+            cv2.addWeighted(overlay, alpha, img_with_text, 1 - alpha, 0, img_with_text)
+            # Add text on top of the box
+            cv2.putText(
+                img_with_text,
+                reward_text,
+                (w - text_width - 5, h - 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+            img = img_with_text
+            imgs.append(img)
         mediapy.write_video("./waymax.mp4", imgs, fps=10)
         self._states.clear()
 
