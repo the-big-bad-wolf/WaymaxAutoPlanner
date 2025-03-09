@@ -226,6 +226,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             imgs.append(img)
         mediapy.write_video("./waymax.mp4", imgs, fps=10)
         self._states.clear()
+        self._rewards.clear()
 
     @property
     def observation_space(self) -> gymnasium.Space:
