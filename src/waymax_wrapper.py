@@ -1,4 +1,5 @@
 # Description: Wrapper for Waymax environment to be compatible with skrl
+import dataclasses
 from typing import Any, Iterator, List, Tuple, Union, override
 
 import gymnasium
@@ -12,6 +13,42 @@ from jax import jit
 from waymax import datatypes
 from waymax import env as _env
 from waymax import visualization
+
+
+def construct_SDC_route(
+    state: _env.PlanningAgentSimulatorState,
+) -> _env.PlanningAgentSimulatorState:
+    """Construct a SDC route from the logged trajectory. This is neccessary for the progression metric as WOMD doesn't release their routes.
+    Args:
+        state: The simulator state.
+    Returns:
+        The updated simulator state with the SDC route.
+    """
+    # Calculate arc lengths (cumulative distances along the trajectory)
+    # Calculate differences between consecutive points
+    dx = jnp.diff(state.log_trajectory.x, axis=-1)
+    dy = jnp.diff(state.log_trajectory.y, axis=-1)
+
+    # Calculate Euclidean distance for each step
+    step_distances = jnp.sqrt(dx**2 + dy**2)
+
+    # Calculate cumulative distances
+    arc_lengths = jnp.zeros_like(state.log_trajectory.x)
+    arc_lengths = arc_lengths.at[..., 1:].set(jnp.cumsum(step_distances, axis=-1))
+
+    logged_route = datatypes.Paths(
+        x=state.log_trajectory.x,
+        y=state.log_trajectory.y,
+        z=state.log_trajectory.z,
+        valid=state.log_trajectory.valid,
+        arc_length=arc_lengths,
+        on_route=jnp.array([[True]]),
+        ids=jnp.array([[0] * len(state.log_trajectory.x)]),  # Dummy ID
+    )
+    return dataclasses.replace(
+        state,
+        sdc_paths=logged_route,
+    )
 
 
 def merged_step(
@@ -35,6 +72,7 @@ def merged_reset(
     env: _env.PlanningAgentEnvironment, scenario: datatypes.SimulatorState
 ):
     state = env.reset(scenario)
+    state = construct_SDC_route(state)
     observation = env.observe(state).reshape(1, -1)
     return state, observation
 

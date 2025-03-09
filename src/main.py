@@ -36,9 +36,9 @@ def setup_waymax():
         controlled_objects=_config.ObjectType.NON_SDC,
     )
     print("Available metrics:", metrics.get_metric_names())
-    metrics_config = _config.MetricsConfig(metrics_to_run=("log_divergence", "offroad"))
+    metrics_config = _config.MetricsConfig(metrics_to_run=("sdc_progression",))
     reward_config = _config.LinearCombinationRewardConfig(
-        rewards={"log_divergence": -1.0, "offroad": -1.0}
+        rewards={"sdc_progression": 1.0},
     )
     env_config = dataclasses.replace(
         _config.EnvironmentConfig(),
