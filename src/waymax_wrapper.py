@@ -37,7 +37,7 @@ def construct_SDC_route(
     z = sdc_trajectory.z
 
     # Downsample trajectory coordinates by keeping every 3rd point
-    stride = 3
+    stride = 10
 
     # Get downsampled coordinates
     x_downsampled = x[..., ::stride]
