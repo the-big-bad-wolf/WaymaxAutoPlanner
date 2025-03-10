@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 from skrl import config
 from skrl.agents.jax.ppo import PPO, PPO_DEFAULT_CONFIG
+from skrl.resources.schedulers.jax import KLAdaptiveRL
 from skrl.memories.jax import RandomMemory
 from skrl.models.jax import DeterministicMixin, GaussianMixin, Model
 from skrl.trainers.jax import SequentialTrainer
@@ -124,6 +125,8 @@ if __name__ == "__main__":
     # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html#configuration-and-hyperparameters
     cfg = PPO_DEFAULT_CONFIG.copy()
     cfg["rollouts"] = mem_size  # memory_size
+    cfg["learning_rate_scheduler"] = KLAdaptiveRL
+    cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.008}
 
     agent = PPO(
         models=models,
