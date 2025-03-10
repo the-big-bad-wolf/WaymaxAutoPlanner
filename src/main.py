@@ -22,8 +22,8 @@ config.jax.device = jax.devices("cpu")[0]
 
 
 def setup_waymax():
-    # path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
-    path = "data/training_tfexample.tfrecord@5"
+    path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
+    # path = "data/training_tfexample.tfrecord@5"
     max_num_objects = 128
     data_loader_config = dataclasses.replace(
         _config.WOD_1_1_0_TRAINING,
@@ -41,7 +41,7 @@ def setup_waymax():
         metrics_to_run=("sdc_progression", "offroad")
     )
     reward_config = _config.LinearCombinationRewardConfig(
-        rewards={"sdc_progression": 10.0, "offroad": -1.0},
+        rewards={"sdc_progression": 5.0, "offroad": -1.0},
     )
     env_config = dataclasses.replace(
         _config.EnvironmentConfig(),
@@ -66,7 +66,7 @@ class Policy(GaussianMixin, Model):
         observation_space,
         action_space,
         device=None,
-        clip_actions=True,
+        clip_actions=False,
         clip_log_std=True,
         min_log_std=-20,
         max_log_std=2,
@@ -80,8 +80,8 @@ class Policy(GaussianMixin, Model):
 
     @nn.compact  # marks the given module method allowing inlined submodules
     def __call__(self, inputs, role):
-        x = nn.relu(nn.Dense(64)(inputs["states"]))
-        x = nn.relu(nn.Dense(64)(x))
+        x = nn.relu(nn.Dense(32)(inputs["states"]))
+        x = nn.relu(nn.Dense(32)(x))
         x = nn.Dense(self.num_actions)(x)  # type: ignore
         log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
         return nn.tanh(x), log_std, {}
@@ -96,8 +96,8 @@ class Value(DeterministicMixin, Model):
 
     @nn.compact  # marks the given module method allowing inlined submodules
     def __call__(self, inputs, role):
-        x = nn.relu(nn.Dense(64)(inputs["states"]))
-        x = nn.relu(nn.Dense(64)(x))
+        x = nn.relu(nn.Dense(32)(inputs["states"]))
+        x = nn.relu(nn.Dense(32)(x))
         x = nn.Dense(1)(x)
         return x, {}
 
@@ -125,6 +125,9 @@ if __name__ == "__main__":
     # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html#configuration-and-hyperparameters
     cfg = PPO_DEFAULT_CONFIG.copy()
     cfg["rollouts"] = mem_size  # memory_size
+    cfg["mini_batches"] = 1024
+    cfg["random_timesteps"] = 1000
+    cfg["entropy_loss_scale"] = 0.01
     cfg["learning_rate_scheduler"] = KLAdaptiveRL
     cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.008}
 
@@ -137,7 +140,7 @@ if __name__ == "__main__":
     )
 
     # configure and instantiate the RL trainer
-    cfg_trainer = {"timesteps": 1000000, "headless": True}
+    cfg_trainer = {"timesteps": 50000, "headless": True}
     trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
     # start training
