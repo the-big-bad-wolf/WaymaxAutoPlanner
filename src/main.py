@@ -41,7 +41,7 @@ def setup_waymax():
         metrics_to_run=("sdc_progression", "offroad")
     )
     reward_config = _config.LinearCombinationRewardConfig(
-        rewards={"sdc_progression": 100.0, "offroad": -1.0},
+        rewards={"sdc_progression": 10.0, "offroad": -1.0},
     )
     env_config = dataclasses.replace(
         _config.EnvironmentConfig(),
@@ -137,7 +137,7 @@ if __name__ == "__main__":
     )
 
     # configure and instantiate the RL trainer
-    cfg_trainer = {"timesteps": 190000, "headless": True}
+    cfg_trainer = {"timesteps": 1000000, "headless": True}
     trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
     # start training
