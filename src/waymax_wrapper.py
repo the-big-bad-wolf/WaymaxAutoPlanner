@@ -32,26 +32,45 @@ def construct_SDC_route(
         state.object_metadata.is_sdc,
         keepdims=True,
     )
+    x = sdc_trajectory.x
+    y = sdc_trajectory.y
+    z = sdc_trajectory.z
+
+    # Downsample trajectory coordinates by keeping every 3rd point
+    stride = 3
+
+    # Get downsampled coordinates
+    x_downsampled = x[..., ::stride]
+    y_downsampled = y[..., ::stride]
+    z_downsampled = z[..., ::stride]
+
+    # Check if last point needs to be added
+    num_points = x.shape[-1]
+    last_included = (num_points - 1) % stride == 0
+
+    x = jnp.concatenate([x_downsampled, x[..., -1:]], axis=-1)
+    y = jnp.concatenate([y_downsampled, y[..., -1:]], axis=-1)
+    z = jnp.concatenate([z_downsampled, z[..., -1:]], axis=-1)
 
     # Calculate differences between consecutive points
-    dx = jnp.diff(sdc_trajectory.x, axis=-1)
-    dy = jnp.diff(sdc_trajectory.y, axis=-1)
+    dx = jnp.diff(x, axis=-1)
+    dy = jnp.diff(y, axis=-1)
 
     # Calculate Euclidean distance for each step
     step_distances = jnp.sqrt(dx**2 + dy**2)
 
     # Calculate cumulative distances
-    arc_lengths = jnp.zeros_like(sdc_trajectory.x)
+    arc_lengths = jnp.zeros_like(x)
     arc_lengths = arc_lengths.at[..., 1:].set(jnp.cumsum(step_distances, axis=-1))
 
     logged_route = datatypes.Paths(
-        x=sdc_trajectory.x,
-        y=sdc_trajectory.y,
-        z=sdc_trajectory.z,
-        valid=sdc_trajectory.valid,
+        x=x,
+        y=y,
+        z=z,
+        valid=jnp.array([[True] * len(x[0])]),
         arc_length=arc_lengths,
         on_route=jnp.array([[True]]),
-        ids=jnp.array([[0] * len(sdc_trajectory.x)]),  # Dummy ID
+        ids=jnp.array([[0] * len(x)]),  # Dummy ID
     )
     return dataclasses.replace(
         state,
