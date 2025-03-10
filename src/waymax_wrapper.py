@@ -27,7 +27,7 @@ def construct_SDC_route(
     """
     # Calculate arc lengths (cumulative distances along the trajectory)
     # Select sdc trajectory
-    sdc_trajectory = datatypes.select_by_onehot(
+    sdc_trajectory: datatypes.Trajectory = datatypes.select_by_onehot(
         state.log_trajectory,
         state.object_metadata.is_sdc,
         keepdims=True,
