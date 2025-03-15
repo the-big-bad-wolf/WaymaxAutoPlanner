@@ -8,6 +8,7 @@ from dm_env import specs
 from waymax import datatypes
 from waymax import env as _env
 from waymax.env import typedefs as types
+from waymax.metrics.roadgraph import is_offroad
 
 
 def ray_segment_intersection(
@@ -147,6 +148,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         sdc_trajectory = datatypes.select_by_onehot(
             observation.trajectory,
             observation.is_ego,
+            keepdims=True,
         )
         sdc_velocity_xy = sdc_trajectory.vel_xy
         sdc_xy_goal = datatypes.select_by_onehot(
@@ -160,6 +162,8 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             state.object_metadata.is_sdc,
             keepdims=True,
         )
+        sdc_offroad = is_offroad(sdc_trajectory, observation.roadgraph_static_points)
+        sdc_offroad = sdc_offroad.astype(jnp.float32)  # Convert boolean to float32
 
         _, sdc_idx = jax.lax.top_k(observation.is_ego, k=1)
         non_sdc_xy = jnp.delete(
@@ -185,12 +189,11 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             [
                 sdc_xy_goal.flatten(),
                 sdc_velocity_xy.flatten(),
+                sdc_offroad.flatten(),
                 circogram.flatten(),
             ],
             axis=-1,
         )
-
-        # jax.debug.breakpoint()
         return obs
 
     @override
@@ -202,10 +205,11 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         # Define dimensions for each observation component
         sdc_goal_dim = 2
         sdc_vel_dim = 2
+        sdc_offroad_dim = 1
         circogram_dim = 64
 
         # Total shape is the sum of all component dimensions
-        total_dim = sdc_goal_dim + sdc_vel_dim + circogram_dim
+        total_dim = sdc_goal_dim + sdc_vel_dim + sdc_offroad_dim + circogram_dim
 
         # Define min/max bounds for each component
         sdc_goal_min = [-1000] * sdc_goal_dim
@@ -214,12 +218,19 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         sdc_vel_min = [-30] * sdc_vel_dim
         sdc_vel_max = [30] * sdc_vel_dim
 
+        sdc_offroad_min = [0] * sdc_offroad_dim
+        sdc_offroad_max = [1] * sdc_offroad_dim
+
         circogram_min = [0] * circogram_dim
         circogram_max = [100] * circogram_dim
 
         # Combine all bounds
-        min_bounds = jnp.array(sdc_goal_min + sdc_vel_min + circogram_min)
-        max_bounds = jnp.array(sdc_goal_max + sdc_vel_max + circogram_max)
+        min_bounds = jnp.array(
+            sdc_goal_min + sdc_vel_min + sdc_offroad_min + circogram_min
+        )
+        max_bounds = jnp.array(
+            sdc_goal_max + sdc_vel_max + sdc_offroad_max + circogram_max
+        )
 
         return specs.BoundedArray(
             shape=(total_dim,),
