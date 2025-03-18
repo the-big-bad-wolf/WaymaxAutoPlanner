@@ -170,7 +170,7 @@ class CNN_Value(DeterministicMixin, Model):
             cnn_input, (batch_size, -1, 1)
         )  # [batch, features, channels]
 
-        # Apply convolutional layers with circular padding
+        # Apply 2 convolutional layers with circular padding
         x = nn.Conv(features=8, kernel_size=3, padding="CIRCULAR")(cnn_input)
         x = nn.leaky_relu(x)
 
@@ -182,7 +182,8 @@ class CNN_Value(DeterministicMixin, Model):
         x = nn.leaky_relu(nn.Dense(16)(x))
         x = nn.Dense(1)(x)
 
-        return x, {}
+        # Scale output to match min and max cumulative reward
+        return 80 * nn.tanh(x), {}
 
 
 if __name__ == "__main__":
@@ -208,7 +209,7 @@ if __name__ == "__main__":
     # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html#configuration-and-hyperparameters
     cfg = PPO_DEFAULT_CONFIG.copy()
     cfg["rollouts"] = mem_size  # memory_size
-    cfg["mini_batches"] = 512
+    cfg["mini_batches"] = 1024
     cfg["random_timesteps"] = 0
     cfg["entropy_loss_scale"] = 0
     cfg["learning_rate_scheduler"] = KLAdaptiveRL
@@ -223,7 +224,7 @@ if __name__ == "__main__":
     )
 
     # configure and instantiate the RL trainer
-    cfg_trainer = {"timesteps": 1000000, "headless": True}
+    cfg_trainer = {"timesteps": 2000000, "headless": True}
     trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
     # start training
