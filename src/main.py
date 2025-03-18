@@ -60,48 +60,6 @@ def setup_waymax():
     return env, data_iter
 
 
-class MLP_Policy(GaussianMixin, Model):
-    def __init__(
-        self,
-        observation_space,
-        action_space,
-        device=None,
-        clip_actions=False,
-        clip_log_std=True,
-        min_log_std=-20,
-        max_log_std=2,
-        reduction="sum",
-        **kwargs
-    ):
-        Model.__init__(self, observation_space, action_space, device, **kwargs)
-        GaussianMixin.__init__(
-            self, clip_actions, clip_log_std, min_log_std, max_log_std, reduction
-        )
-
-    @nn.compact  # marks the given module method allowing inlined submodules
-    def __call__(self, inputs, role):
-        x = nn.relu(nn.Dense(32)(inputs["states"]))
-        x = nn.relu(nn.Dense(32)(x))
-        x = nn.Dense(self.num_actions)(x)  # type: ignore
-        log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
-        return nn.tanh(x), log_std, {}
-
-
-class MLP_Value(DeterministicMixin, Model):
-    def __init__(
-        self, observation_space, action_space, device=None, clip_actions=False, **kwargs
-    ):
-        Model.__init__(self, observation_space, action_space, device, **kwargs)
-        DeterministicMixin.__init__(self, clip_actions)
-
-    @nn.compact  # marks the given module method allowing inlined submodules
-    def __call__(self, inputs, role):
-        x = nn.relu(nn.Dense(16)(inputs["states"]))
-        x = nn.relu(nn.Dense(16)(x))
-        x = nn.Dense(1)(x)
-        return x, {}
-
-
 class CNN_Policy(GaussianMixin, Model):
     def __init__(
         self,
