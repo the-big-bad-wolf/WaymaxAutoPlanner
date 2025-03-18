@@ -142,7 +142,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         Returns:
           Simulator state as an observation without modifications of shape (...).
         """
-        # Get base observation first
+        # Get base observation from SDC perspective first
         observation = datatypes.sdc_observation_from_state(state, roadgraph_top_k=1000)
 
         sdc_trajectory = datatypes.select_by_onehot(
@@ -151,17 +151,25 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             keepdims=True,
         )
         sdc_velocity_xy = sdc_trajectory.vel_xy
+
+        # Create the goal position from the last point in the logged trajectory
         sdc_xy_goal = datatypes.select_by_onehot(
             state.log_trajectory.xy[..., -1, :],
             state.object_metadata.is_sdc,
             keepdims=True,
         )
         sdc_xy_goal = utils.transform_points(observation.pose2d.matrix, sdc_xy_goal)[0]
+        # Convert the goal position from Cartesian to polar coordinates
+        sdc_goal_distance = jnp.sqrt(
+            sdc_xy_goal[..., 0] ** 2 + sdc_xy_goal[..., 1] ** 2
+        )
+        sdc_goal_angle = jnp.arctan2(sdc_xy_goal[..., 1], sdc_xy_goal[..., 0])
         sdc_yaw_goal = datatypes.select_by_onehot(
             state.log_trajectory.yaw[..., -1],
             state.object_metadata.is_sdc,
             keepdims=True,
         )
+
         sdc_offroad = is_offroad(sdc_trajectory, observation.roadgraph_static_points)
         sdc_offroad = sdc_offroad.astype(jnp.float32)  # Convert boolean to float32
 
@@ -175,10 +183,8 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         non_sdc_valid = jnp.delete(
             observation.trajectory.valid, sdc_idx, axis=1, assume_unique_indices=True
         ).reshape(127, 1)
-
         # Set positions of invalid objects to 10000
         non_sdc_xy = non_sdc_xy * non_sdc_valid + (1 - non_sdc_valid) * 10000
-
         # Set velocities of invalid objects to 0
         non_sdc_vel_xy = non_sdc_vel_xy * non_sdc_valid
 
@@ -187,7 +193,8 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
 
         obs = jnp.concatenate(
             [
-                sdc_xy_goal.flatten(),
+                sdc_goal_distance.flatten(),
+                sdc_goal_angle.flatten(),
                 sdc_velocity_xy.flatten(),
                 sdc_offroad.flatten(),
                 circogram.flatten(),
