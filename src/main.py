@@ -23,7 +23,7 @@ config.jax.device = jax.devices("cpu")[0]
 
 def setup_waymax():
     path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
-    path = "data/training_tfexample.tfrecord@5"
+    # path = "data/training_tfexample.tfrecord@5"
     max_num_objects = 128
     data_loader_config = dataclasses.replace(
         _config.WOD_1_1_0_TRAINING,
@@ -90,8 +90,14 @@ class CNN_Policy(GaussianMixin, Model):
             cnn_input, (batch_size, -1, 1)
         )  # [batch, features, channels]
 
-        # Apply 2 convolutional layers with circular padding
-        x = nn.Conv(features=8, kernel_size=3, padding="CIRCULAR")(cnn_input)
+        # Apply 5 convolutional layers with circular padding
+        x = nn.Conv(features=8, kernel_size=5, padding="CIRCULAR")(cnn_input)
+        x = nn.leaky_relu(x)
+        x = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x)
+        x = nn.leaky_relu(x)
+        x = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x)
+        x = nn.leaky_relu(x)
+        x = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x)
         x = nn.leaky_relu(x)
         x = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x)
         x = nn.leaky_relu(x)
@@ -101,8 +107,10 @@ class CNN_Policy(GaussianMixin, Model):
         x = jnp.concatenate([first_five, x], axis=1)  # Combine with first 5 features
 
         # Final MLP layers
-        x = nn.leaky_relu(nn.Dense(16)(x))
-        x = nn.leaky_relu(nn.Dense(16)(x))
+        x = nn.leaky_relu(nn.Dense(32)(x))
+        x = nn.leaky_relu(nn.Dense(32)(x))
+        x = nn.leaky_relu(nn.Dense(32)(x))
+        x = nn.leaky_relu(nn.Dense(32)(x))
         x = nn.Dense(self.num_actions)(x)
         log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
 
@@ -129,7 +137,11 @@ class CNN_Value(DeterministicMixin, Model):
         )  # [batch, features, channels]
 
         # Apply 2 convolutional layers with circular padding
-        x = nn.Conv(features=8, kernel_size=3, padding="CIRCULAR")(cnn_input)
+        x = nn.Conv(features=8, kernel_size=5, padding="CIRCULAR")(cnn_input)
+        x = nn.leaky_relu(x)
+        x = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x)
+        x = nn.leaky_relu(x)
+        x = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x)
         x = nn.leaky_relu(x)
 
         # Flatten output and concatenate with first_five features
@@ -137,11 +149,11 @@ class CNN_Value(DeterministicMixin, Model):
         x = jnp.concatenate([first_five, x], axis=1)  # Combine with first 5 features
 
         # Final MLP layers
-        x = nn.leaky_relu(nn.Dense(16)(x))
+        x = nn.leaky_relu(nn.Dense(32)(x))
+        x = nn.leaky_relu(nn.Dense(32)(x))
         x = nn.Dense(1)(x)
 
-        # Scale output to match min and max cumulative reward
-        return 80 * nn.tanh(x), {}
+        return x, {}
 
 
 if __name__ == "__main__":
