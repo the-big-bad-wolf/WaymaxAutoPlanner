@@ -118,9 +118,18 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         self._scenario_loader = scenario_loader
         self._state: _env.PlanningAgentSimulatorState | None = None
         self._reward: float | None = None
+        self._prev_action: jax.Array | np.ndarray = np.zeros((2,), dtype=np.float32)
 
         self._states: List[_env.PlanningAgentSimulatorState] = []  # For rendering
         self._rewards: List[float] = []  # For rendering
+
+    def jerk_reward(
+        self, action: jax.Array | np.ndarray, prev_action: jax.Array | np.ndarray
+    ) -> jax.Array:
+        """Calculate jerk reward based on the difference between the current and previous actions."""
+        accel_jerk = jnp.abs(action[0] - prev_action[0])
+        steering_jerk = jnp.abs(action[1] - prev_action[1])
+        return -accel_jerk - 5 * steering_jerk
 
     @override
     def reset(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
@@ -155,6 +164,8 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         )
         observation = np.array(observation).reshape(1, -1)
         reward = np.array(reward).reshape(1, -1)
+        reward += self.jerk_reward(actions, self._prev_action)
+        self._prev_action = actions
         terminated = np.array(terminated).reshape(1, -1)
         truncated = np.array(truncated).reshape(1, -1)
 
