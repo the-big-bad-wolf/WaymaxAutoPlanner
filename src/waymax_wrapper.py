@@ -2,6 +2,7 @@
 import dataclasses
 from typing import Any, Iterator, List, Tuple, Union, override
 
+import cv2
 import gymnasium
 import jax
 import jax.numpy as jnp
@@ -13,7 +14,6 @@ from jax import jit
 from waymax import datatypes
 from waymax import env as _env
 from waymax import visualization
-import cv2
 
 
 def construct_SDC_route(
@@ -129,7 +129,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         """Calculate jerk reward based on the difference between the current and previous actions."""
         accel_jerk = np.abs(actions[0][0] - prev_actions[0]) / 2
         steering_jerk = np.abs(actions[0][1] - prev_actions[1]) / 2
-        return -0.5 * accel_jerk - steering_jerk
+        return -0.1 * accel_jerk - 0.3 * steering_jerk
 
     @override
     def reset(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
