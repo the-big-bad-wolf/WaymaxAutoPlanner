@@ -26,8 +26,8 @@ def ray_segment_intersection(
         Array of distances from origin to intersections. Returns 100.0 if no intersection.
     """
     # Calculate ray direction
-    ray_dir_x = jnp.sin(ray_angle)
-    ray_dir_y = jnp.cos(ray_angle)
+    ray_dir_x = jnp.cos(ray_angle)
+    ray_dir_y = jnp.sin(ray_angle)
 
     # Calculate segment direction
     segment_dir_x = segment_dirs[:, 0]
@@ -41,7 +41,7 @@ def ray_segment_intersection(
     det = jnp.where(is_parallel, 1.0, det)  # Avoid division by zero
 
     # Calculate t1 and t2 parameters
-    t1 = (start_points[:, 0] * ray_dir_y - start_points[:, 1] * ray_dir_x) / det
+    t1 = -(start_points[:, 0] * ray_dir_y - start_points[:, 1] * ray_dir_x) / det
     t2 = (start_points[:, 0] * segment_dir_y - start_points[:, 1] * segment_dir_x) / det
 
     # Check if intersection is within segment (0 <= t1 <= 1) and ray (t2 >= 0)
@@ -65,57 +65,82 @@ def ray_segment_intersection(
     return jnp.where(valid_intersection, distances, 100.0)
 
 
-def find_closest_distance(
-    i, initval: Tuple[jax.Array, datatypes.RoadgraphPoints, jax.Array]
+def circogram_subroutine(
+    i: int, initval: Tuple[jax.Array, jax.Array, Tuple[jax.Array, jax.Array], jax.Array]
 ):
-    circogram, rg_points, ray_angles = initval
+    circogram, ray_angles, (starting_points, dir_xy), candidate_mask = initval
     ray_angle = ray_angles[i]
-
-    # Only consider valid points
-    candidate_points = rg_points.valid
-
-    # Only consider road edge points
-    candidate_points = candidate_points & (
-        (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_BOUNDARY)
-        | (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_MEDIAN)
-        | (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_UNKNOWN)
-    )
-
-    # If no valid points, return the default distance
-    has_valid = jnp.any(candidate_points)
-
-    # Create line segments from roadgraph points
-    starting_points = jnp.stack([rg_points.x, rg_points.y], axis=1)
-    dir_xy = jnp.stack([rg_points.dir_x, rg_points.dir_y], axis=1)
 
     # Calculate intersection distances
     intersection_distances = ray_segment_intersection(
         ray_angle, starting_points, dir_xy
     )
-    masked_distances = jnp.where(candidate_points, intersection_distances, 100.0)
 
-    # Find minimum distance among valid points
+    # Only consider specified segments
+    masked_distances = jnp.where(candidate_mask, intersection_distances, 100.0)
+
+    # Find minimum distance among candidate segments
     min_distance = jnp.min(masked_distances)
 
-    # Update only the i-th element and return the whole array
-    circogram = circogram.at[i].set(jnp.where(has_valid, min_distance, circogram[i]))
-    return circogram, rg_points, ray_angles
+    # Update only the i-th circogram ray and return the whole array
+    circogram = circogram.at[i].set(min_distance)
+    return circogram, ray_angles, (starting_points, dir_xy), candidate_mask
 
 
-def create_circogram(observation: datatypes.Observation, num_rays: int) -> jax.Array:
+def create_road_circogram(
+    observation: datatypes.Observation, num_rays: int
+) -> jax.Array:
     ray_angles = jnp.linspace(0, 2 * jnp.pi, num_rays, endpoint=False)
-    rg_points = observation.roadgraph_static_points
-    # For each ray angle, find the closest intersection
     circogram = jnp.full(num_rays, 100.0)  # Default max distance
-    (
-        circogram,
-        _,
-        _,
-    ) = jax.lax.fori_loop(
+    rg_points = observation.roadgraph_static_points
+    candidate_mask = rg_points.valid
+    candidate_mask = candidate_mask & (
+        (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_BOUNDARY)
+        | (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_MEDIAN)
+        | (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_UNKNOWN)
+    )
+    # Create line segments from roadgraph points
+    starting_points = jnp.stack([rg_points.x, rg_points.y], axis=1)
+    dir_xy = jnp.stack([rg_points.dir_x, rg_points.dir_y], axis=1)
+    line_segments = (starting_points, dir_xy)
+
+    (circogram, _, _, _) = jax.lax.fori_loop(
         0,
         num_rays,
-        find_closest_distance,
-        (circogram, rg_points, ray_angles),
+        circogram_subroutine,
+        (circogram, ray_angles, line_segments, candidate_mask),
+    )
+    return circogram
+
+
+def create_object_circogram(
+    observation: datatypes.Observation, num_rays: int
+) -> jax.Array:
+    ray_angles = jnp.linspace(0, 2 * jnp.pi, num_rays, endpoint=False)
+    circogram = jnp.full(num_rays, 100.0)  # Default max distance
+
+    candidate_mask = observation.trajectory.valid[..., 0, :, 0]
+    candidate_mask = candidate_mask & ~observation.is_ego[..., 0, :]
+    candidate_mask = jnp.repeat(
+        candidate_mask, 4
+    )  # (num_objects*4,) Each object has 4 segments
+
+    # Create line segments from object bounding box corners
+    obj_corners = observation.trajectory.bbox_corners[0, :, 0, :, :]
+    start_indices = jnp.array([0, 1, 2, 3])
+    end_indices = jnp.array([1, 2, 3, 0])
+    start_points = obj_corners[:, start_indices]  # (num_objects, 4, 2)
+    end_points = obj_corners[:, end_indices]  # (num_objects, 4, 2)
+    segment_dirs = end_points - start_points  # (num_objects, 4, 2)
+    start_points = start_points.reshape(-1, 2)  # (num_objects*4, 2)
+    segment_dirs = segment_dirs.reshape(-1, 2)  # (num_objects*4, 2)
+    line_segments = (start_points, segment_dirs)
+
+    (circogram, _, _, _) = jax.lax.fori_loop(
+        0,
+        num_rays,
+        circogram_subroutine,
+        (circogram, ray_angles, line_segments, candidate_mask),
     )
     return circogram
 
@@ -189,7 +214,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         non_sdc_vel_xy = non_sdc_vel_xy * non_sdc_valid
 
         num_rays = 64
-        circogram = create_circogram(observation, num_rays)
+        road_circogram = create_road_circogram(observation, num_rays)
 
         obs = jnp.concatenate(
             [
@@ -197,7 +222,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
                 sdc_goal_angle.flatten(),
                 sdc_velocity_xy.flatten(),
                 sdc_offroad.flatten(),
-                circogram.flatten(),
+                road_circogram.flatten(),
             ],
             axis=-1,
         )
