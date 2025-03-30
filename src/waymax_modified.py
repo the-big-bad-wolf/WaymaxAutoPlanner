@@ -198,23 +198,9 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         sdc_offroad = is_offroad(sdc_trajectory, observation.roadgraph_static_points)
         sdc_offroad = sdc_offroad.astype(jnp.float32)  # Convert boolean to float32
 
-        _, sdc_idx = jax.lax.top_k(observation.is_ego, k=1)
-        non_sdc_xy = jnp.delete(
-            observation.trajectory.xy, sdc_idx, axis=1, assume_unique_indices=True
-        ).reshape(127, 2)
-        non_sdc_vel_xy = jnp.delete(
-            observation.trajectory.vel_xy, sdc_idx, axis=1, assume_unique_indices=True
-        ).reshape(127, 2)
-        non_sdc_valid = jnp.delete(
-            observation.trajectory.valid, sdc_idx, axis=1, assume_unique_indices=True
-        ).reshape(127, 1)
-        # Set positions of invalid objects to 10000
-        non_sdc_xy = non_sdc_xy * non_sdc_valid + (1 - non_sdc_valid) * 10000
-        # Set velocities of invalid objects to 0
-        non_sdc_vel_xy = non_sdc_vel_xy * non_sdc_valid
-
         num_rays = 64
         road_circogram = create_road_circogram(observation, num_rays)
+        object_circogram = create_object_circogram(observation, num_rays)
 
         obs = jnp.concatenate(
             [
@@ -223,6 +209,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
                 sdc_velocity_xy.flatten(),
                 sdc_offroad.flatten(),
                 road_circogram.flatten(),
+                object_circogram.flatten(),
             ],
             axis=-1,
         )
@@ -235,33 +222,63 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             Observation spec of the environment.
         """
         # Define dimensions for each observation component
-        sdc_goal_dim = 2
+        sdc_goal_angle_dim = 1
+        sdc_goal_distance_dim = 1
         sdc_vel_dim = 2
         sdc_offroad_dim = 1
-        circogram_dim = 64
+        road_circogram_dim = 64
+        object_circogram_dim = 64
 
         # Total shape is the sum of all component dimensions
-        total_dim = sdc_goal_dim + sdc_vel_dim + sdc_offroad_dim + circogram_dim
+        total_dim = (
+            sdc_goal_angle_dim
+            + sdc_goal_distance_dim
+            + sdc_vel_dim
+            + sdc_offroad_dim
+            + road_circogram_dim
+            + object_circogram_dim
+        )
 
         # Define min/max bounds for each component
-        sdc_goal_min = [-1000] * sdc_goal_dim
-        sdc_goal_max = [1000] * sdc_goal_dim
+        sdc_goal_angle_min = [-jnp.pi]
+        sdc_goal_angle_max = [jnp.pi]
+        sdc_goal_distance_min = [0]
+        sdc_goal_distance_max = [250]
 
-        sdc_vel_min = [-30] * sdc_vel_dim
-        sdc_vel_max = [30] * sdc_vel_dim
+        # Radial speed
+        sdc_vel_x_min = [-30]
+        sdc_vel_x_max = [30]
 
-        sdc_offroad_min = [0] * sdc_offroad_dim
-        sdc_offroad_max = [1] * sdc_offroad_dim
+        # Tangential speed. The limit is calculated based on a maximum absolute speed of 30 m/s
+        sdc_vel_y_min = [-9]
+        sdc_vel_y_max = [9]
 
-        circogram_min = [0] * circogram_dim
-        circogram_max = [100] * circogram_dim
+        sdc_offroad_min = [0]
+        sdc_offroad_max = [1]
+
+        road_circogram_min = [0] * road_circogram_dim
+        road_circogram_max = [100] * road_circogram_dim
+        object_circogram_min = [0] * object_circogram_dim
+        object_circogram_max = [100] * object_circogram_dim
 
         # Combine all bounds
         min_bounds = jnp.array(
-            sdc_goal_min + sdc_vel_min + sdc_offroad_min + circogram_min
+            sdc_goal_angle_min
+            + sdc_goal_distance_min
+            + sdc_vel_x_min
+            + sdc_vel_y_min
+            + sdc_offroad_min
+            + road_circogram_min
+            + object_circogram_min
         )
         max_bounds = jnp.array(
-            sdc_goal_max + sdc_vel_max + sdc_offroad_max + circogram_max
+            sdc_goal_angle_max
+            + sdc_goal_distance_max
+            + sdc_vel_x_max
+            + sdc_vel_y_max
+            + sdc_offroad_max
+            + road_circogram_max
+            + object_circogram_max
         )
 
         return specs.BoundedArray(

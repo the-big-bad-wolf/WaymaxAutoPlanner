@@ -38,10 +38,10 @@ def setup_waymax():
     )
     print("Available metrics:", metrics.get_metric_names())
     metrics_config = _config.MetricsConfig(
-        metrics_to_run=("sdc_progression", "offroad")
+        metrics_to_run=("sdc_progression", "offroad", "overlap")
     )
     reward_config = _config.LinearCombinationRewardConfig(
-        rewards={"sdc_progression": 1.0, "offroad": -1.0},
+        rewards={"sdc_progression": 1.0, "offroad": -1.0, "overlap": -1.0},
     )
     env_config = dataclasses.replace(
         _config.EnvironmentConfig(),
@@ -82,16 +82,17 @@ class CNN_Policy(GaussianMixin, Model):
     def __call__(self, inputs, role):
         # Split inputs - extract first 5 features and the rest for CNN
         first_five = inputs["states"][:, :5]  # First 5 features
-        cnn_input = inputs["states"][:, 5:]
+        road_circogram = inputs["states"][:, 5:69]
+        object_circogram = inputs["states"][:, 69:133]
 
-        # Reshape CNN input for 1D convolution - add channel dimension
-        batch_size = cnn_input.shape[0]
-        cnn_input = jnp.reshape(
-            cnn_input, (batch_size, -1, 1)
+        # Reshape road_circogram for 1D convolution - add channel dimension
+        batch_size = road_circogram.shape[0]
+        road_circogram = jnp.reshape(
+            road_circogram, (batch_size, -1, 1)
         )  # [batch, features, channels]
 
         # Apply 5 convolutional layers with circular padding
-        x = nn.Conv(features=8, kernel_size=5, padding="CIRCULAR")(cnn_input)
+        x = nn.Conv(features=8, kernel_size=5, padding="CIRCULAR")(road_circogram)
         x = nn.leaky_relu(x)
         x = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x)
         x = nn.leaky_relu(x)
@@ -101,6 +102,23 @@ class CNN_Policy(GaussianMixin, Model):
         x = nn.leaky_relu(x)
         x = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x)
         x = nn.leaky_relu(x)
+
+        # Reshape object_circogram for 1D convolution - add channel dimension
+        object_circogram = jnp.reshape(object_circogram, (batch_size, -1, 1))
+        # Apply 5 convolutional layers with circular padding
+        x2 = nn.Conv(features=8, kernel_size=5, padding="CIRCULAR")(object_circogram)
+        x2 = nn.leaky_relu(x2)
+        x2 = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x2)
+        x2 = nn.leaky_relu(x2)
+        x2 = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x2)
+        x2 = nn.leaky_relu(x2)
+        x2 = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x2)
+        x2 = nn.leaky_relu(x2)
+        x2 = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x2)
+        x2 = nn.leaky_relu(x2)
+
+        # Concatenate the outputs of the two branches
+        x = jnp.concatenate([x, x2], axis=1)
 
         # Flatten output and concatenate with first_five features
         x = x.reshape(batch_size, -1)  # Flatten conv output
@@ -136,12 +154,16 @@ class CNN_Value(DeterministicMixin, Model):
             cnn_input, (batch_size, -1, 1)
         )  # [batch, features, channels]
 
-        # Apply 2 convolutional layers with circular padding
+        # Apply 5 convolutional layers with circular padding
         x = nn.Conv(features=8, kernel_size=5, padding="CIRCULAR")(cnn_input)
         x = nn.leaky_relu(x)
         x = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x)
         x = nn.leaky_relu(x)
         x = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x)
+        x = nn.leaky_relu(x)
+        x = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x)
+        x = nn.leaky_relu(x)
+        x = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x)
         x = nn.leaky_relu(x)
 
         # Flatten output and concatenate with first_five features
@@ -149,6 +171,8 @@ class CNN_Value(DeterministicMixin, Model):
         x = jnp.concatenate([first_five, x], axis=1)  # Combine with first 5 features
 
         # Final MLP layers
+        x = nn.leaky_relu(nn.Dense(32)(x))
+        x = nn.leaky_relu(nn.Dense(32)(x))
         x = nn.leaky_relu(nn.Dense(32)(x))
         x = nn.leaky_relu(nn.Dense(32)(x))
         x = nn.Dense(1)(x)
@@ -201,7 +225,7 @@ if __name__ == "__main__":
     trainer.train()
 
     # load the latest checkpoint (adjust the path as needed)
-    # agent.load("runs/25-03-10_14-13-28-381661_PPO/checkpoints/best_agent.pickle")
+    # agent.load("runs/25-03-24_21-15-57-580380_PPO/checkpoints/best_agent.pickle")
     # visualize the training
     trainer.timesteps = 1000
     trainer.headless = False
