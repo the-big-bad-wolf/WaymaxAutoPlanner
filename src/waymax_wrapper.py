@@ -2,6 +2,7 @@
 import dataclasses
 from typing import Any, Iterator, List, Tuple, Union, override
 
+import casadi
 import cv2
 import gymnasium
 import jax
@@ -9,11 +10,15 @@ import jax.numpy as jnp
 import mediapy
 import numpy as np
 import skrl.envs.wrappers.jax as skrl_wrappers
+import waymax.utils.geometry as utils
 from dm_env import specs
 from jax import jit
 from waymax import datatypes
 from waymax import env as _env
 from waymax import visualization
+
+from mpc import create_mpc_solver
+from waymax_modified import create_road_circogram
 
 
 def construct_SDC_route(
@@ -107,6 +112,64 @@ def merged_reset(
 merged_reset = jit(merged_reset, static_argnums=(0,))
 
 
+compiled_mpc_solver = create_mpc_solver()
+
+jit_select = jax.jit(datatypes.select_by_onehot, static_argnums=(2))
+jit_observe_from_state = jax.jit(datatypes.sdc_observation_from_state)
+jit_transform_points = jax.jit(utils.transform_points)
+jit_create_road_circogram = jax.jit(create_road_circogram, static_argnums=(1))
+
+
+def get_MPC_action(state: datatypes.SimulatorState) -> Tuple[float, float]:
+    observation = jit_observe_from_state(state)
+    sdc_trajectory = jit_select(
+        observation.trajectory,
+        observation.is_ego,
+        keepdims=True,
+    )
+    sdc_velocity_xy = sdc_trajectory.vel_xy
+    sdc_xy_goal = jit_select(
+        state.log_trajectory.xy[..., -1, :],
+        state.object_metadata.is_sdc,
+        keepdims=True,
+    )
+    sdc_xy_goal = jit_transform_points(observation.pose2d.matrix, sdc_xy_goal)[0]
+
+    start_x = 0.0
+    start_y = 0.0
+    start_yaw = 0.0
+    start_vel_x = float(sdc_velocity_xy.flatten()[0])
+    start_vel_y = float(sdc_velocity_xy.flatten()[1])
+    start_speed = np.sqrt(start_vel_x**2 + start_vel_y**2)
+
+    target_x = float(sdc_xy_goal[0])
+    target_y = float(sdc_xy_goal[1])
+
+    num_rays = 64
+    road_circogram = jit_create_road_circogram(observation, num_rays)
+
+    try:
+        params = casadi.DM(
+            [start_x, start_y, start_yaw, start_speed, target_x, target_y]
+        )
+        circogram = casadi.DM(road_circogram)
+
+        # Call the function correctly
+        result = compiled_mpc_solver(params, circogram)
+
+        # Extract results (must convert to scalar values)
+        optimal_accel = float(result[0])
+        optimal_steering = float(result[1])
+
+    except Exception as e:
+        print(f"MPC solver failed: {str(e)[:100]}...")
+        # Fallback to a simple controller
+        optimal_steering = 0.0  # No steering
+        optimal_accel = 0.0  # No acceleration
+
+    return (optimal_accel, optimal_steering)
+
+
 class WaymaxWrapper(skrl_wrappers.Wrapper):
     def __init__(
         self,
@@ -119,6 +182,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         self._state: _env.PlanningAgentSimulatorState | None = None
         self._reward: float | None = None
         self._prev_action: jax.Array | np.ndarray = np.zeros((2,), dtype=np.float32)
+        self._MPC_action: Tuple[float, float] = (0.0, 0.0)
 
         self._states: List[_env.PlanningAgentSimulatorState] = []  # For rendering
         self._rewards: List[float] = []  # For rendering
@@ -140,7 +204,15 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         """
         scenario = next(self._scenario_loader)
         self._state, observation = merged_reset(self._env, scenario)
+
+        mpc_action = get_MPC_action(self._state)
+        self._MPC_action = mpc_action
+        mpc_action_array = np.array(mpc_action).reshape(1, 2)  # Convert to 1x2 array
         observation = np.array(observation).reshape(1, -1)
+        # Prepend MPC actions to observation
+        observation = np.concatenate([mpc_action_array, observation], axis=1)
+        observation = observation.reshape(1, -1)
+
         return observation, {}
 
     @override
@@ -159,13 +231,34 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         :return: Observation, reward, terminated, truncated, info
         :rtype: tuple of np.ndarray or jax.Array and any other info
         """
-        self._state, observation, reward, terminated, truncated = merged_step(
-            self._env, self._state, actions  # type: ignore
+        # Merge actions with MPC actions for a combined control strategy
+        # MPC provides a baseline which we can adjust with RL actions
+        mpc_accel, mpc_steering = self._MPC_action
+        rl_accel, rl_steering = actions[0]
+
+        # Combine MPC and RL actions (using RL as a correction to MPC)
+        combined_accel = mpc_accel + rl_accel
+        combined_steering = mpc_steering + rl_steering
+
+        # Reshape for the environment step
+        combined_actions = np.array(
+            [[combined_accel, combined_steering]], dtype=np.float32
         )
+        self._state, observation, reward, terminated, truncated = merged_step(
+            self._env, self._state, combined_actions  # type: ignore
+        )
+
+        mpc_action = get_MPC_action(self._state)
+        self._MPC_action = mpc_action
+        mpc_action_array = np.array(mpc_action).reshape(1, 2)  # Convert to 1x2 array
         observation = np.array(observation).reshape(1, -1)
+        # Prepend MPC actions to observation
+        observation = np.concatenate([mpc_action_array, observation], axis=1)
+        observation = observation.reshape(1, -1)
+
         reward = np.array(reward).reshape(1, -1)
         reward += self.jerk_reward(actions, self._prev_action)
-        self._prev_action = actions[0]
+        self._prev_action = combined_actions[0]  # Update previous action
         terminated = np.array(terminated).reshape(1, -1)
         truncated = np.array(truncated).reshape(1, -1)
 

@@ -80,10 +80,10 @@ class CNN_Policy(GaussianMixin, Model):
 
     @nn.compact  # marks the given module method allowing inlined submodules
     def __call__(self, inputs, role):
-        # Split inputs - extract first 5 features and the rest for CNN
-        first_five = inputs["states"][:, :5]  # First 5 features
-        road_circogram = inputs["states"][:, 5:69]
-        object_circogram = inputs["states"][:, 69:133]
+        # Split inputs - extract first 7 features and the rest for CNN
+        first_seven = inputs["states"][:, :7]  # First 7 features
+        road_circogram = inputs["states"][:, 7:71]
+        object_circogram = inputs["states"][:, 71:135]
 
         # Reshape road_circogram for 1D convolution - add channel dimension
         batch_size = road_circogram.shape[0]
@@ -120,9 +120,9 @@ class CNN_Policy(GaussianMixin, Model):
         # Concatenate the outputs of the two branches
         x = jnp.concatenate([x, x2], axis=1)
 
-        # Flatten output and concatenate with first_five features
+        # Flatten output and concatenate with first_seven features
         x = x.reshape(batch_size, -1)  # Flatten conv output
-        x = jnp.concatenate([first_five, x], axis=1)  # Combine with first 5 features
+        x = jnp.concatenate([first_seven, x], axis=1)  # Combine with first 7 features
 
         # Final MLP layers
         x = nn.leaky_relu(nn.Dense(32)(x))
@@ -144,18 +144,23 @@ class CNN_Value(DeterministicMixin, Model):
 
     @nn.compact
     def __call__(self, inputs, role):
-        # Split inputs - extract first 5 features and the rest for CNN
-        first_five = inputs["states"][:, :5]  # First 5 features
-        cnn_input = inputs["states"][:, 5:]
+        # Split inputs - extract first 7 features and the rest for CNN
+        first_five = inputs["states"][:, :7]  # First 7 features
+        cnn_input = inputs["states"][:, 7:]
 
         # Reshape CNN input for 1D convolution - add channel dimension
-        batch_size = cnn_input.shape[0]
-        cnn_input = jnp.reshape(
-            cnn_input, (batch_size, -1, 1)
+        first_seven = inputs["states"][:, :7]  # First 7 features
+        road_circogram = inputs["states"][:, 7:71]
+        object_circogram = inputs["states"][:, 71:135]
+
+        # Reshape road_circogram for 1D convolution - add channel dimension
+        batch_size = road_circogram.shape[0]
+        road_circogram = jnp.reshape(
+            road_circogram, (batch_size, -1, 1)
         )  # [batch, features, channels]
 
         # Apply 5 convolutional layers with circular padding
-        x = nn.Conv(features=8, kernel_size=5, padding="CIRCULAR")(cnn_input)
+        x = nn.Conv(features=8, kernel_size=5, padding="CIRCULAR")(road_circogram)
         x = nn.leaky_relu(x)
         x = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x)
         x = nn.leaky_relu(x)
@@ -166,9 +171,26 @@ class CNN_Value(DeterministicMixin, Model):
         x = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x)
         x = nn.leaky_relu(x)
 
-        # Flatten output and concatenate with first_five features
+        # Reshape object_circogram for 1D convolution - add channel dimension
+        object_circogram = jnp.reshape(object_circogram, (batch_size, -1, 1))
+        # Apply 5 convolutional layers with circular padding
+        x2 = nn.Conv(features=8, kernel_size=5, padding="CIRCULAR")(object_circogram)
+        x2 = nn.leaky_relu(x2)
+        x2 = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x2)
+        x2 = nn.leaky_relu(x2)
+        x2 = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x2)
+        x2 = nn.leaky_relu(x2)
+        x2 = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x2)
+        x2 = nn.leaky_relu(x2)
+        x2 = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x2)
+        x2 = nn.leaky_relu(x2)
+
+        # Concatenate the outputs of the two branches
+        x = jnp.concatenate([x, x2], axis=1)
+
+        # Flatten output and concatenate with first_seven features
         x = x.reshape(batch_size, -1)  # Flatten conv output
-        x = jnp.concatenate([first_five, x], axis=1)  # Combine with first 5 features
+        x = jnp.concatenate([first_seven, x], axis=1)  # Combine with first 7 features
 
         # Final MLP layers
         x = nn.leaky_relu(nn.Dense(32)(x))
@@ -218,7 +240,7 @@ if __name__ == "__main__":
     )
 
     # configure and instantiate the RL trainer
-    cfg_trainer = {"timesteps": 2000000, "headless": True}
+    cfg_trainer = {"timesteps": 100000, "headless": True}
     trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
     # start training

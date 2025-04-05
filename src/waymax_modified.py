@@ -222,6 +222,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             Observation spec of the environment.
         """
         # Define dimensions for each observation component
+        MPC_action_dim = 2
         sdc_goal_angle_dim = 1
         sdc_goal_distance_dim = 1
         sdc_vel_dim = 2
@@ -231,7 +232,8 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
 
         # Total shape is the sum of all component dimensions
         total_dim = (
-            sdc_goal_angle_dim
+            MPC_action_dim
+            + sdc_goal_angle_dim
             + sdc_goal_distance_dim
             + sdc_vel_dim
             + sdc_offroad_dim
@@ -240,6 +242,9 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         )
 
         # Define min/max bounds for each component
+        MPC_action_min = [-1.0, -1.0]
+        MPC_action_max = [1.0, 1.0]
+
         sdc_goal_angle_min = [-jnp.pi]
         sdc_goal_angle_max = [jnp.pi]
         sdc_goal_distance_min = [0]
@@ -263,7 +268,8 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
 
         # Combine all bounds
         min_bounds = jnp.array(
-            sdc_goal_angle_min
+            MPC_action_min
+            + sdc_goal_angle_min
             + sdc_goal_distance_min
             + sdc_vel_x_min
             + sdc_vel_y_min
@@ -272,7 +278,8 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             + object_circogram_min
         )
         max_bounds = jnp.array(
-            sdc_goal_angle_max
+            MPC_action_max
+            + sdc_goal_angle_max
             + sdc_goal_distance_max
             + sdc_vel_x_max
             + sdc_vel_y_max
