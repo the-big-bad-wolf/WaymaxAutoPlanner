@@ -193,7 +193,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         """Calculate jerk reward based on the difference between the current and previous actions."""
         accel_jerk = np.abs(actions[0][0] - prev_actions[0]) / 2
         steering_jerk = np.abs(actions[0][1] - prev_actions[1]) / 2
-        return -0.1 * accel_jerk - 0.3 * steering_jerk
+        return -1 * accel_jerk - 5 * steering_jerk
 
     @override
     def reset(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
@@ -257,7 +257,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         observation = observation.reshape(1, -1)
 
         reward = np.array(reward).reshape(1, -1)
-        reward += self.jerk_reward(actions, self._prev_action)
+        reward += self.jerk_reward(combined_actions, self._prev_action)
         self._prev_action = combined_actions[0]  # Update previous action
         terminated = np.array(terminated).reshape(1, -1)
         truncated = np.array(truncated).reshape(1, -1)
