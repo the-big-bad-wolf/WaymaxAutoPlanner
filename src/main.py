@@ -32,30 +32,33 @@ def setup_waymax():
         max_num_rg_points=30000,
     )
     data_iter = dataloader.simulator_state_generator(config=data_loader_config)
-    sim_agent_config = _config.SimAgentConfig(
+    IDM_agent_config = _config.SimAgentConfig(
         agent_type=_config.SimAgentType.IDM,
         controlled_objects=_config.ObjectType.NON_SDC,
+    )
+    IDM_agent = agents.create_sim_agents_from_config(
+        config=IDM_agent_config,
     )
     print("Available metrics:", metrics.get_metric_names())
     metrics_config = _config.MetricsConfig(
         metrics_to_run=("sdc_progression", "offroad", "overlap")
     )
     reward_config = _config.LinearCombinationRewardConfig(
-        rewards={"sdc_progression": 1.0, "offroad": -1.0, "overlap": -1.0},
+        rewards={"sdc_progression": 10.0, "offroad": -20.0, "overlap": -20.0},
     )
     env_config = dataclasses.replace(
         _config.EnvironmentConfig(),
         metrics=metrics_config,
         rewards=reward_config,
         max_num_objects=max_num_objects,
-        sim_agents=[sim_agent_config],
     )
     dynamics_model = dynamics.InvertibleBicycleModel(normalize_actions=True)
+
     env = WaymaxEnv(
         dynamics_model=dynamics_model,
         config=env_config,
-        sim_agent_actors=[agents.create_sim_agents_from_config(sim_agent_config)],
-        sim_agent_params=[{}],
+        sim_agent_actors=[],
+        sim_agent_params=[],
     )
     return env, data_iter
 
@@ -207,7 +210,7 @@ if __name__ == "__main__":
     env = WaymaxWrapper(env, data_iter)
 
     # instantiate a memory as rollout buffer (any memory can be used for this)
-    mem_size = 8192
+    mem_size = 16384
     memory = RandomMemory(memory_size=mem_size, num_envs=1)
 
     # instantiate the agent's models (function approximators).
@@ -225,9 +228,9 @@ if __name__ == "__main__":
     # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html#configuration-and-hyperparameters
     cfg = PPO_DEFAULT_CONFIG.copy()
     cfg["rollouts"] = mem_size  # memory_size
-    cfg["mini_batches"] = 1024
+    cfg["mini_batches"] = 2048
     cfg["random_timesteps"] = 0
-    cfg["entropy_loss_scale"] = 0
+    cfg["entropy_loss_scale"] = 0.01
     cfg["learning_rate_scheduler"] = KLAdaptiveRL
     cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.008}
 
@@ -238,16 +241,16 @@ if __name__ == "__main__":
         observation_space=env.observation_space,
         action_space=env.action_space,
     )
+    # agent.load("runs/25-04-08_13-57-27-970371_PPO/checkpoints/best_agent.pickle")
 
     # configure and instantiate the RL trainer
-    cfg_trainer = {"timesteps": 100000, "headless": True}
+    cfg_trainer = {"timesteps": 1000000, "headless": True}
     trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
     # start training
     trainer.train()
 
     # load the latest checkpoint (adjust the path as needed)
-    # agent.load("runs/25-03-24_21-15-57-580380_PPO/checkpoints/best_agent.pickle")
     # visualize the training
     trainer.timesteps = 1000
     trainer.headless = False
