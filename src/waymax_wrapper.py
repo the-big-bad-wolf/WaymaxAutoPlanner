@@ -1,5 +1,4 @@
 # Description: Wrapper for Waymax environment to be compatible with skrl
-import dataclasses
 from typing import Any, Iterator, List, Tuple, Union, override
 
 import casadi
@@ -19,68 +18,6 @@ from waymax import visualization
 
 from mpc import create_mpc_solver
 from waymax_modified import create_road_circogram
-
-
-def construct_SDC_route(
-    state: _env.PlanningAgentSimulatorState,
-) -> _env.PlanningAgentSimulatorState:
-    """Construct a SDC route from the logged trajectory. This is neccessary for the progression metric as WOMD doesn't release their routes.
-    Args:
-        state: The simulator state.
-    Returns:
-        The updated simulator state with the SDC route.
-    """
-    # Calculate arc lengths (cumulative distances along the trajectory)
-    # Select sdc trajectory
-    sdc_trajectory: datatypes.Trajectory = datatypes.select_by_onehot(
-        state.log_trajectory,
-        state.object_metadata.is_sdc,
-        keepdims=True,
-    )
-    x = sdc_trajectory.x
-    y = sdc_trajectory.y
-    z = sdc_trajectory.z
-
-    # Downsample trajectory coordinates
-    stride = 5  # Downsample every 5th point
-
-    # Get downsampled coordinates
-    x_downsampled = x[..., ::stride]
-    y_downsampled = y[..., ::stride]
-    z_downsampled = z[..., ::stride]
-
-    # Check if last point needs to be added
-    num_points = x.shape[-1]
-    last_included = (num_points - 1) % stride == 0
-
-    x = jnp.concatenate([x_downsampled, x[..., -1:]], axis=-1)
-    y = jnp.concatenate([y_downsampled, y[..., -1:]], axis=-1)
-    z = jnp.concatenate([z_downsampled, z[..., -1:]], axis=-1)
-
-    # Calculate differences between consecutive points
-    dx = jnp.diff(x, axis=-1)
-    dy = jnp.diff(y, axis=-1)
-
-    # Calculate Euclidean distance for each step
-    step_distances = jnp.sqrt(dx**2 + dy**2)
-
-    # Calculate cumulative distances
-    arc_lengths = jnp.zeros_like(x)
-    arc_lengths = arc_lengths.at[..., 1:].set(jnp.cumsum(step_distances, axis=-1))
-
-    logged_route = datatypes.Paths(
-        x=x,
-        y=y,
-        z=z,
-        valid=jnp.array([[True] * len(x[0])]),
-        arc_length=arc_lengths,
-        on_route=jnp.array([[True]]),
-        ids=jnp.array([[0] * len(x)]),  # Dummy ID
-    )
-    return dataclasses.replace(
-        state,
-        sdc_paths=logged_route,
-    )
 
 
 def merged_step(
@@ -104,7 +41,6 @@ def merged_reset(
     env: _env.PlanningAgentEnvironment, scenario: datatypes.SimulatorState
 ):
     state = env.reset(scenario)
-    state = construct_SDC_route(state)
     observation = env.observe(state).reshape(1, -1)
     return state, observation
 
@@ -175,15 +111,23 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         self,
         env: _env.PlanningAgentEnvironment,
         scenario_loader: Iterator[datatypes.SimulatorState],
+        action_space_type: str = "gaussian_poly",
     ):
         super().__init__(env)
         self._env: _env.PlanningAgentEnvironment
         self._scenario_loader = scenario_loader
-        self._state: _env.PlanningAgentSimulatorState | None = None
-        self._reward: float | None = None
-        self._prev_action: jax.Array | np.ndarray = np.zeros((2,), dtype=np.float32)
-        self._MPC_action: Tuple[float, float] = (0.0, 0.0)
+        self._action_space_type = action_space_type
 
+        self._MPC_action: Tuple[float, float] = (
+            0.0,
+            0.0,
+        )  # For making MPC available as part of observation
+        self._prev_action: jax.Array | np.ndarray = np.zeros(
+            (2,), dtype=np.float32
+        )  # For jerk reward
+
+        self._state: _env.PlanningAgentSimulatorState | None = None  # For rendering
+        self._reward: float | None = None  # For rendering
         self._states: List[_env.PlanningAgentSimulatorState] = []  # For rendering
         self._rewards: List[float] = []  # For rendering
 
@@ -204,14 +148,15 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         """
         scenario = next(self._scenario_loader)
         self._state, observation = merged_reset(self._env, scenario)
+        observation = np.array(observation).reshape(1, -1)
 
+        """"
         mpc_action = get_MPC_action(self._state)
         self._MPC_action = mpc_action
         mpc_action_array = np.array(mpc_action).reshape(1, 2)  # Convert to 1x2 array
-        observation = np.array(observation).reshape(1, -1)
         # Prepend MPC actions to observation
         observation = np.concatenate([mpc_action_array, observation], axis=1)
-        observation = observation.reshape(1, -1)
+        """
 
         return observation, {}
 
@@ -237,8 +182,8 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         rl_accel, rl_steering = actions[0]
 
         # Combine MPC and RL actions (using RL as a correction to MPC)
-        combined_accel = mpc_accel + rl_accel
-        combined_steering = mpc_steering + rl_steering
+        combined_accel = rl_accel  # + mpc_accel
+        combined_steering = rl_steering  # + mpc_steering
 
         # Reshape for the environment step
         combined_actions = np.array(
@@ -248,21 +193,22 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             self._env, self._state, combined_actions  # type: ignore
         )
 
-        mpc_action = get_MPC_action(self._state)
-        self._MPC_action = mpc_action
-        mpc_action_array = np.array(mpc_action).reshape(1, 2)  # Convert to 1x2 array
         observation = np.array(observation).reshape(1, -1)
-        # Prepend MPC actions to observation
-        observation = np.concatenate([mpc_action_array, observation], axis=1)
-        observation = observation.reshape(1, -1)
-
         reward = np.array(reward).reshape(1, -1)
-        reward += self.jerk_reward(combined_actions, self._prev_action)
-        self._prev_action = combined_actions[0]  # Update previous action
         terminated = np.array(terminated).reshape(1, -1)
         truncated = np.array(truncated).reshape(1, -1)
 
+        reward += self.jerk_reward(combined_actions, self._prev_action)
+        self._prev_action = combined_actions[0]  # Update previous action
         self._reward = reward[0, 0]
+        """
+        mpc_action = get_MPC_action(self._state)
+        self._MPC_action = mpc_action
+        mpc_action_array = np.array(mpc_action).reshape(1, 2)  # Convert to 1x2 array
+        # Prepend MPC actions to observation
+        observation = np.concatenate([mpc_action_array, observation], axis=1)
+        observation = observation.reshape(1, -1)
+        """
         return observation, reward, terminated, truncated, {}
 
     def state(self) -> Union[np.ndarray, jax.Array]:
@@ -346,7 +292,51 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
     @property
     def action_space(self) -> gymnasium.Space:
         """Action space"""
-        action_spec: specs.BoundedArray = self._env.action_spec().data  # type: ignore
-        return gymnasium.spaces.Box(
-            low=action_spec.minimum, high=action_spec.maximum, shape=(2,), dtype=action_spec.dtype  # type: ignore
-        )
+
+        if self._action_space_type == "gaussian_poly":
+            # Configuration for the polynomial coefficients distribution
+            num_polys = 2  # Two cubic polynomials
+            poly_degree = 3
+            num_coeffs_per_poly = (
+                poly_degree + 1
+            )  # 4 coefficients per polynomial (a, b, c, d)
+            mean_dim = (
+                num_polys * num_coeffs_per_poly
+            )  # 8 dimensions for the mean vector
+
+            # Cholesky factor dimensions for the 8x8 covariance matrix
+            cholesky_diag_dim = (
+                mean_dim  # 8 diagonal elements (parameterized as log-std)
+            )
+            cholesky_offdiag_dim = (
+                mean_dim * (mean_dim - 1) // 2
+            )  # 8*7/2 = 28 off-diagonal elements
+            cholesky_params_dim = (
+                cholesky_diag_dim + cholesky_offdiag_dim
+            )  # 8 + 28 = 36 parameters for Cholesky
+
+            # Total dimension of the action space vector
+            total_dim = mean_dim + cholesky_params_dim  # 8 + 36 = 44
+
+            # Define bounds for the action space components.
+            bound_limit = 10.0
+            min_bounds = np.full((total_dim,), -bound_limit, dtype=np.float32)
+            max_bounds = np.full((total_dim,), bound_limit, dtype=np.float32)
+
+            return gymnasium.spaces.Box(
+                low=min_bounds,
+                high=max_bounds,
+                shape=(total_dim,),
+                dtype=np.float32,
+            )
+        elif self._action_space_type == "bicycle":
+            # Original simple action space (e.g., acceleration, steering)
+            action_spec: specs.BoundedArray = self._env.action_spec().data  # type: ignore
+            return gymnasium.spaces.Box(
+                low=action_spec.minimum,
+                high=action_spec.maximum,
+                shape=(2,),
+                dtype=action_spec.dtype,  # type: ignore
+            )
+        else:
+            raise ValueError(f"Unknown action_space_type: {self._action_space_type}")
