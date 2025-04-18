@@ -2,21 +2,21 @@ import dataclasses
 
 from skrl import config
 from skrl.agents.jax.ppo import PPO, PPO_DEFAULT_CONFIG
-from skrl.resources.schedulers.jax import KLAdaptiveRL
 from skrl.memories.jax import RandomMemory
+from skrl.resources.schedulers.jax import KLAdaptiveRL
 from skrl.trainers.jax import SequentialTrainer
 from waymax import agents
 from waymax import config as _config
 from waymax import dataloader, dynamics, metrics
 
+from models import Policy_Model, Value_Model
 from waymax_modified import WaymaxEnv
 from waymax_wrapper import WaymaxWrapper
-from models import Policy_Model, Value_Model
 
 
 def setup_waymax():
     path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
-    # path = "data/training_tfexample.tfrecord@5"
+    path = "data/training_tfexample.tfrecord@5"
     max_num_objects = 128
     data_loader_config = dataclasses.replace(
         _config.WOD_1_1_0_TRAINING,
