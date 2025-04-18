@@ -1,7 +1,6 @@
 # Description: Wrapper for Waymax environment to be compatible with skrl
 from typing import Any, Iterator, List, Tuple, Union, override
 
-import casadi
 import cv2
 import gymnasium
 import jax
@@ -9,15 +8,13 @@ import jax.numpy as jnp
 import mediapy
 import numpy as np
 import skrl.envs.wrappers.jax as skrl_wrappers
-import waymax.utils.geometry as utils
 from dm_env import specs
 from jax import jit
 from waymax import datatypes
 from waymax import env as _env
 from waymax import visualization
 
-from mpc import create_mpc_solver
-from waymax_modified import create_road_circogram
+from mpc import get_MPC_action
 
 
 def merged_step(
@@ -46,64 +43,6 @@ def merged_reset(
 
 
 merged_reset = jit(merged_reset, static_argnums=(0,))
-
-
-compiled_mpc_solver = create_mpc_solver()
-
-jit_select = jax.jit(datatypes.select_by_onehot, static_argnums=(2))
-jit_observe_from_state = jax.jit(datatypes.sdc_observation_from_state)
-jit_transform_points = jax.jit(utils.transform_points)
-jit_create_road_circogram = jax.jit(create_road_circogram, static_argnums=(1))
-
-
-def get_MPC_action(state: datatypes.SimulatorState) -> Tuple[float, float]:
-    observation = jit_observe_from_state(state)
-    sdc_trajectory = jit_select(
-        observation.trajectory,
-        observation.is_ego,
-        keepdims=True,
-    )
-    sdc_velocity_xy = sdc_trajectory.vel_xy
-    sdc_xy_goal = jit_select(
-        state.log_trajectory.xy[..., -1, :],
-        state.object_metadata.is_sdc,
-        keepdims=True,
-    )
-    sdc_xy_goal = jit_transform_points(observation.pose2d.matrix, sdc_xy_goal)[0]
-
-    start_x = 0.0
-    start_y = 0.0
-    start_yaw = 0.0
-    start_vel_x = float(sdc_velocity_xy.flatten()[0])
-    start_vel_y = float(sdc_velocity_xy.flatten()[1])
-    start_speed = np.sqrt(start_vel_x**2 + start_vel_y**2)
-
-    target_x = float(sdc_xy_goal[0])
-    target_y = float(sdc_xy_goal[1])
-
-    num_rays = 64
-    road_circogram = jit_create_road_circogram(observation, num_rays)
-
-    try:
-        params = casadi.DM(
-            [start_x, start_y, start_yaw, start_speed, target_x, target_y]
-        )
-        circogram = casadi.DM(road_circogram)
-
-        # Call the function correctly
-        result = compiled_mpc_solver(params, circogram)
-
-        # Extract results (must convert to scalar values)
-        optimal_accel = float(result[0])
-        optimal_steering = float(result[1])
-
-    except Exception as e:
-        print(f"MPC solver failed: {str(e)[:100]}...")
-        # Fallback to a simple controller
-        optimal_steering = 0.0  # No steering
-        optimal_accel = 0.0  # No acceleration
-
-    return (optimal_accel, optimal_steering)
 
 
 class WaymaxWrapper(skrl_wrappers.Wrapper):

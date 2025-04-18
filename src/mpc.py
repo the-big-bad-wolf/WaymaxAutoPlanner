@@ -1,22 +1,14 @@
-from typing import Any, Tuple, override
+import os
+from typing import Tuple
 
 import casadi
 import jax
-import jax.numpy as jnp
-import mediapy
 import numpy as np
 import waymax.utils.geometry as utils
-from dm_env import specs
-from tqdm import tqdm
-from waymax import agents
-from waymax import config as _config
-from waymax import dataloader, datatypes, dynamics
-from waymax import env as _env
-from waymax import visualization
-from waymax.env import typedefs as types
-from waymax.metrics.roadgraph import is_offroad
-import os
 from casadi import external
+from waymax import datatypes
+
+from waymax_modified import create_road_circogram
 
 
 def create_mpc_solver() -> casadi.Function:
@@ -140,3 +132,60 @@ def create_mpc_solver() -> casadi.Function:
         print(f"C compilation failed, using normal CasADi function: {str(e)}...")
 
     return mpc_fn
+
+
+jit_select = jax.jit(datatypes.select_by_onehot, static_argnums=(2))
+jit_observe_from_state = jax.jit(datatypes.sdc_observation_from_state)
+jit_transform_points = jax.jit(utils.transform_points)
+jit_create_road_circogram = jax.jit(create_road_circogram, static_argnums=(1))
+
+
+def get_MPC_action(state: datatypes.SimulatorState) -> Tuple[float, float]:
+    observation = jit_observe_from_state(state)
+    sdc_trajectory = jit_select(
+        observation.trajectory,
+        observation.is_ego,
+        keepdims=True,
+    )
+    sdc_velocity_xy = sdc_trajectory.vel_xy
+    sdc_xy_goal = jit_select(
+        state.log_trajectory.xy[..., -1, :],
+        state.object_metadata.is_sdc,
+        keepdims=True,
+    )
+    sdc_xy_goal = jit_transform_points(observation.pose2d.matrix, sdc_xy_goal)[0]
+
+    start_x = 0.0
+    start_y = 0.0
+    start_yaw = 0.0
+    start_vel_x = float(sdc_velocity_xy.flatten()[0])
+    start_vel_y = float(sdc_velocity_xy.flatten()[1])
+    start_speed = np.sqrt(start_vel_x**2 + start_vel_y**2)
+
+    target_x = float(sdc_xy_goal[0])
+    target_y = float(sdc_xy_goal[1])
+
+    num_rays = 64
+    road_circogram = jit_create_road_circogram(observation, num_rays)
+
+    try:
+        params = casadi.DM(
+            [start_x, start_y, start_yaw, start_speed, target_x, target_y]
+        )
+        circogram = casadi.DM(road_circogram)
+
+        # Call the function correctly
+        compiled_mpc_solver = create_mpc_solver()
+        result = compiled_mpc_solver(params, circogram)
+
+        # Extract results (must convert to scalar values)
+        optimal_accel = float(result[0])
+        optimal_steering = float(result[1])
+
+    except Exception as e:
+        print(f"MPC solver failed: {str(e)[:100]}...")
+        # Fallback to a simple controller
+        optimal_steering = 0.0  # No steering
+        optimal_accel = 0.0  # No acceleration
+
+    return (optimal_accel, optimal_steering)
