@@ -1,8 +1,11 @@
+from typing import Any
 import jax
 import jax.numpy as jnp
 import jax.random as random
-from waymax import env as _env
 from jax.lax import lgamma
+from waymax import agents
+from waymax import datatypes
+from waymax import env as _env
 
 
 def binom_jax(n, k):
@@ -50,12 +53,11 @@ def get_best_action(
     cholesky_matrix = cholesky_matrix.at[tril_indices].set(cholesky_params)
 
     # Generate a random sample from the multivariate Gaussian distribution
-    key = random.key(0)  # TODO base seed on timestep
-    samples = random.multivariate_normal(key, mean_params, cholesky_matrix, shape=(N,))
+    random_key = random.key(0)  # TODO base seed on timestep
+    samples = random.multivariate_normal(
+        random_key, mean_params, cholesky_matrix, shape=(N,)
+    )
 
-    assert (
-        D % 2 == 0
-    ), "Total number of parameters (D) must be even for two equal-degree polynomials."
     num_params_per_poly = D // 2
 
     # Split the samples into two equal parts for two polynomials
@@ -108,45 +110,80 @@ def get_best_action(
     # Shape: (N, num_steps, 2)
     action_sequences = jnp.stack([poly1_values, poly2_values], axis=-1)
 
-    # TODO: Evaluate these action sequences using the rollout_env and find the best one
-    # This part is left for subsequent steps based on the function's goal.
-    # For now, we might return the sequences or proceed with evaluation.
-    # The function signature implies returning the *best action*, which likely means
-    # evaluating these sequences and selecting the best initial action.
-    # Placeholder for trajectory evaluation and selection logic:
-    # costs = evaluate_trajectories(action_sequences, state, rollout_env)
-    # best_sequence_index = jnp.argmin(costs)
-    # best_action = action_sequences[best_sequence_index, 0, :] # Example: return first action of best sequence
-    # return best_action # Or potentially the best sequence: action_sequences[best_sequence_index]
+    # Generate N random keys for the rollouts
+    rollout_keys = random.split(random_key, N)
 
-    # Returning the generated sequences for now, evaluation logic needs to be added
-    # based on how 'best_action' is defined (first action vs full sequence).
-    # Assuming the goal is to evaluate these sequences later:
-    # (The function name suggests returning a single action, implying evaluation happens here)
+    # Define actor init and select_action functions (remain the same)
+    init = lambda rng, state: {
+        "action_index": 0,
+    }
 
-    # --- Placeholder for evaluation logic ---
-    # This requires rolling out each sequence in the environment.
-    # Due to complexity and potential statefulness/randomness in rollout,
-    # this part needs careful implementation, possibly using jax.lax.scan or vmap.
+    def select_action(
+        params: Any, state: datatypes.SimulatorState, actor_state: Any, rng: jax.Array
+    ):
+        # Get the current action sequence and index
+        action_index = actor_state["action_index"]
+        # params now contains a single action_sequence for one rollout
+        action_sequence = params["action_sequence"]
 
-    # Example structure (needs actual implementation):
-    # def rollout_fn(action_sequence):
-    #    final_state, _ = jax.lax.scan(rollout_env.step, state, action_sequence)
-    #    cost = calculate_cost(final_state) # Define calculate_cost based on objectives
-    #    return cost
-    #
-    # costs = jax.vmap(rollout_fn)(action_sequences)
-    # best_index = jnp.argmin(costs)
-    # best_action_sequence = action_sequences[best_index]
-    # return best_action_sequence[0] # Return the first action of the best sequence
+        # Get the current action
+        # Use lax.dynamic_slice to handle potential out-of-bounds if index exceeds num_steps
+        # Although rollout should handle stopping. Clamp index for safety if needed.
+        current_action = jax.lax.dynamic_slice_in_dim(
+            action_sequence, action_index, 1, axis=0
+        )
+        # Squeeze the time dimension
+        action = jnp.squeeze(current_action, axis=0)
 
-    # For now, returning the sequences as the function doesn't implement evaluation yet.
-    # This might need adjustment based on the full intended logic.
-    # If the function MUST return a single best action (shape typically (2,)),
-    # the evaluation part is non-trivial and needs the cost function definition.
-    # Let's assume for now the function's goal includes evaluation and returns the first action.
-    # Since evaluation logic is missing, we'll return a dummy value matching expected output type.
-    # Replace this with actual evaluation and selection.
+        accel = action[0]
+        steer = action[1]
+
+        # Create the action object
+        action_obj = datatypes.Action(
+            data=jnp.array([accel, steer]),
+            valid=jnp.array([True]),
+        )
+
+        # Update the action index for the next step
+        actor_state["action_index"] += 1
+
+        return agents.WaymaxActorOutput(
+            actor_state=actor_state,  # type: ignore
+            action=action_obj,  # type: ignore
+            is_controlled=state.object_metadata.is_sdc,  # type: ignore
+        )
+
+    sequence_actor = agents.actor_core_factory(init, select_action)
+
+    # Prepare actor_params for vmap: a pytree where the 'action_sequence' leaf has the batch dim N
+    batched_actor_params = {
+        "action_sequence": action_sequences,  # Shape (N, num_steps, 2)
+    }
+
+    # Define a function for a single rollout to be vmapped
+    def single_rollout(rng_key, actor_params_single):
+        return _env.rollout(
+            scenario=state,  # Initial state is the same for all rollouts
+            actor=sequence_actor,
+            env=rollout_env,
+            rng=rng_key,
+            rollout_num_steps=num_steps,
+            actor_params=actor_params_single,
+        )
+
+    # Vmap the rollout function over random keys and actor parameters
+    # in_axes specifies which arguments to map over:
+    # 0 for rng_key (first axis of rollout_keys)
+    # 0 for actor_params_single (first axis of the 'action_sequence' leaf in batched_actor_params)
+    vmapped_rollout = jax.vmap(single_rollout, in_axes=(0, 0))
+
+    # Execute the vmapped rollouts
+    # rollout_outputs will be a pytree structure where each leaf has an added dimension N at the beginning
+    rollout_outputs = vmapped_rollout(rollout_keys, batched_actor_params)
+
+    # TODO: Evaluate the rollout_outputs (e.g., compute rewards/costs)
+    # and select the best action sequence. For now, returning a dummy action.
+
     dummy_best_action = jnp.zeros(2)  # Placeholder
     return dummy_best_action  # Replace with actual best action after evaluation
 

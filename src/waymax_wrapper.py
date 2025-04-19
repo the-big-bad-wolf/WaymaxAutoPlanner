@@ -146,7 +146,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
 
             # Get the best action from the Gaussian polynomial distribution
             rl_accel, rl_steering = jitted_get_best_action(
-                mean_params, cholesky_params, self._state, self._env, 50
+                mean_params, cholesky_params, self._state, self._env, 100
             )
 
         elif self._action_space_type == "bicycle":
