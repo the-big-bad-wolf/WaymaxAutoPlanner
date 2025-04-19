@@ -15,6 +15,7 @@ from waymax import env as _env
 from waymax import visualization
 
 from mpc import get_MPC_action
+from sampler import jitted_get_best_action
 
 
 def merged_step(
@@ -50,12 +51,33 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         self,
         env: _env.PlanningAgentEnvironment,
         scenario_loader: Iterator[datatypes.SimulatorState],
-        action_space_type: str = "gaussian_poly",
+        action_space_type: str = "polynomial_trajectory_sampling",
     ):
         super().__init__(env)
         self._env: _env.PlanningAgentEnvironment
         self._scenario_loader = scenario_loader
         self._action_space_type = action_space_type
+        if action_space_type == "polynomial_trajectory_sampling":
+            # Configuration for the polynomial coefficients distribution
+            num_polys = 2  # Two cubic polynomials
+            poly_degree = 3
+            num_coeffs_per_poly = (
+                poly_degree + 1
+            )  # 4 coefficients per polynomial (a, b, c, d)
+            self._mean_dim = (
+                num_polys * num_coeffs_per_poly
+            )  # 8 dimensions for the mean vector
+
+            # Cholesky factor dimensions for the 8x8 covariance matrix
+            cholesky_diag_dim = (
+                self._mean_dim  # 8 diagonal elements (parameterized as log-std)
+            )
+            cholesky_offdiag_dim = (
+                self._mean_dim * (self._mean_dim - 1) // 2
+            )  # 8*7/2 = 28 off-diagonal elements
+            self._cholesky_params_dim = (
+                cholesky_diag_dim + cholesky_offdiag_dim
+            )  # 8 + 28 = 36 parameters for Cholesky
 
         self._MPC_action: Tuple[float, float] = (
             0.0,
@@ -115,12 +137,26 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         :return: Observation, reward, terminated, truncated, info
         :rtype: tuple of np.ndarray or jax.Array and any other info
         """
-        # Merge actions with MPC actions for a combined control strategy
-        # MPC provides a baseline which we can adjust with RL actions
-        mpc_accel, mpc_steering = self._MPC_action
-        rl_accel, rl_steering = actions[0]
+        actions = actions.flatten()
 
-        # Combine MPC and RL actions (using RL as a correction to MPC)
+        if self._action_space_type == "polynomial_trajectory_sampling":
+            # Extract the mean and Cholesky parameters from the action vector
+            mean_params = jnp.array(actions[: self._mean_dim])
+            cholesky_params = jnp.array(actions[self._mean_dim :])
+
+            # Get the best action from the Gaussian polynomial distribution
+            rl_accel, rl_steering = jitted_get_best_action(
+                mean_params, cholesky_params, self._state, self._env, 50
+            )
+
+        elif self._action_space_type == "bicycle":
+            rl_accel, rl_steering = actions
+
+        else:
+            raise ValueError(f"Unknown action_space_type: {self._action_space_type}")
+
+        mpc_accel, mpc_steering = self._MPC_action
+
         combined_accel = rl_accel  # + mpc_accel
         combined_steering = rl_steering  # + mpc_steering
 
@@ -137,8 +173,8 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         terminated = np.array(terminated).reshape(1, -1)
         truncated = np.array(truncated).reshape(1, -1)
 
-        reward += self.jerk_reward(combined_actions, self._prev_action)
-        self._prev_action = combined_actions[0]  # Update previous action
+        # reward += self.jerk_reward(combined_actions, self._prev_action)
+        # self._prev_action = combined_actions[0]  # Update previous action
         self._reward = reward[0, 0]
         """
         mpc_action = get_MPC_action(self._state)
@@ -149,16 +185,6 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         observation = observation.reshape(1, -1)
         """
         return observation, reward, terminated, truncated, {}
-
-    def state(self) -> Union[np.ndarray, jax.Array]:
-        """Get the environment state
-
-        :raises NotImplementedError: Not implemented
-
-        :return: State
-        :rtype: np.ndarray or jax.Array
-        """
-        raise NotImplementedError
 
     @override
     def render(self, *args, **kwargs) -> Any:
@@ -232,30 +258,9 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
     def action_space(self) -> gymnasium.Space:
         """Action space"""
 
-        if self._action_space_type == "gaussian_poly":
-            # Configuration for the polynomial coefficients distribution
-            num_polys = 2  # Two cubic polynomials
-            poly_degree = 3
-            num_coeffs_per_poly = (
-                poly_degree + 1
-            )  # 4 coefficients per polynomial (a, b, c, d)
-            mean_dim = (
-                num_polys * num_coeffs_per_poly
-            )  # 8 dimensions for the mean vector
-
-            # Cholesky factor dimensions for the 8x8 covariance matrix
-            cholesky_diag_dim = (
-                mean_dim  # 8 diagonal elements (parameterized as log-std)
-            )
-            cholesky_offdiag_dim = (
-                mean_dim * (mean_dim - 1) // 2
-            )  # 8*7/2 = 28 off-diagonal elements
-            cholesky_params_dim = (
-                cholesky_diag_dim + cholesky_offdiag_dim
-            )  # 8 + 28 = 36 parameters for Cholesky
-
+        if self._action_space_type == "polynomial_trajectory_sampling":
             # Total dimension of the action space vector
-            total_dim = mean_dim + cholesky_params_dim  # 8 + 36 = 44
+            total_dim = self._mean_dim + self._cholesky_params_dim  # 8 + 36 = 44
 
             # Define bounds for the action space components.
             bound_limit = 10.0
