@@ -90,10 +90,10 @@ if __name__ == "__main__":
     )
 
     # load the latest checkpoint (adjust the path as needed)
-    # agent.load("runs/25-04-08_13-57-27-970371_PPO/checkpoints/best_agent.pickle")
+    # agent.load("runs/25-04-20_02-49-08-770333_PPO/checkpoints/best_agent.pickle")
 
     # configure and instantiate the RL trainer
-    cfg_trainer = {"timesteps": 1000000, "headless": True}
+    cfg_trainer = {"timesteps": 2000000, "headless": True}
     trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
     # start training

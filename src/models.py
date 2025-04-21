@@ -74,10 +74,12 @@ class Policy_Model(GaussianMixin, Model):
         x = nn.leaky_relu(nn.Dense(32)(x))
         x = nn.leaky_relu(nn.Dense(32)(x))
         x = nn.leaky_relu(nn.Dense(32)(x))
-        x = nn.Dense(self.num_actions)(x)
+        x = nn.Dense(self.num_actions)(x)  # type: ignore
         log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
 
-        return nn.tanh(x), log_std, {}
+        # Make sure the diagonal elements of the cholesky factor are non-negative (it is neccessary to also clip the outputted params as the the standard deviation in the training process may push them negative)
+        x = jnp.concatenate([x[:, :-8], nn.softplus(x[:, -8:])], axis=1)
+        return x, log_std, {}
 
 
 class Value_Model(DeterministicMixin, Model):

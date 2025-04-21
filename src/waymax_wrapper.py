@@ -15,7 +15,7 @@ from waymax import env as _env
 from waymax import visualization
 
 from mpc import get_MPC_action
-from sampler import jitted_get_best_action
+from sampler import jitted_get_best_action, get_best_action
 
 
 def merged_step(
@@ -69,15 +69,12 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             )  # 8 dimensions for the mean vector
 
             # Cholesky factor dimensions for the 8x8 covariance matrix
-            cholesky_diag_dim = (
+            self._cholesky_diag_dim = (
                 self._mean_dim  # 8 diagonal elements (parameterized as log-std)
             )
-            cholesky_offdiag_dim = (
+            self._cholesky_offdiag_dim = (
                 self._mean_dim * (self._mean_dim - 1) // 2
             )  # 8*7/2 = 28 off-diagonal elements
-            self._cholesky_params_dim = (
-                cholesky_diag_dim + cholesky_offdiag_dim
-            )  # 8 + 28 = 36 parameters for Cholesky
 
         self._MPC_action: Tuple[float, float] = (
             0.0,
@@ -141,12 +138,17 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
 
         if self._action_space_type == "polynomial_trajectory_sampling":
             # Extract the mean and Cholesky parameters from the action vector
-            mean_params = jnp.array(actions[: self._mean_dim])
-            cholesky_params = jnp.array(actions[self._mean_dim :])
+            means = jnp.array(actions[: self._mean_dim])
+            cholesky_offdiag = jnp.array(
+                actions[self._mean_dim : self._mean_dim + self._cholesky_offdiag_dim]
+            )
+            cholesky_diag = jnp.array(
+                actions[self._mean_dim + self._cholesky_offdiag_dim :]
+            )
 
             # Get the best action from the Gaussian polynomial distribution
             rl_accel, rl_steering = jitted_get_best_action(
-                mean_params, cholesky_params, self._state, self._env, 100
+                means, cholesky_diag, cholesky_offdiag, self._state, self._env, 2
             )
 
         elif self._action_space_type == "bicycle":
@@ -260,12 +262,34 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
 
         if self._action_space_type == "polynomial_trajectory_sampling":
             # Total dimension of the action space vector
-            total_dim = self._mean_dim + self._cholesky_params_dim  # 8 + 36 = 44
+            total_dim = (
+                self._mean_dim + self._cholesky_offdiag_dim + self._cholesky_diag_dim
+            )
 
             # Define bounds for the action space components.
-            bound_limit = 10.0
-            min_bounds = np.full((total_dim,), -bound_limit, dtype=np.float32)
-            max_bounds = np.full((total_dim,), bound_limit, dtype=np.float32)
+            mean_min = np.full((self._mean_dim,), -np.inf, dtype=np.float32)
+            mean_max = np.full((self._mean_dim,), np.inf, dtype=np.float32)
+
+            cholesky_offdiag_min = np.full(
+                (self._cholesky_offdiag_dim,), -np.inf, dtype=np.float32
+            )
+            cholesky_offdiag_max = np.full(
+                (self._cholesky_offdiag_dim,), np.inf, dtype=np.float32
+            )
+
+            cholesky_diag_min = np.full(
+                (self._cholesky_diag_dim,), 0.0, dtype=np.float32
+            )
+            cholesky_diag_max = np.full(
+                (self._cholesky_diag_dim,), np.inf, dtype=np.float32
+            )
+
+            min_bounds = np.concatenate(
+                [mean_min, cholesky_offdiag_min, cholesky_diag_min], axis=0
+            )
+            max_bounds = np.concatenate(
+                [mean_max, cholesky_offdiag_max, cholesky_diag_max], axis=0
+            )
 
             return gymnasium.spaces.Box(
                 low=min_bounds,

@@ -21,8 +21,9 @@ def binom_jax(n, k):
 
 
 def get_best_action(
-    mean_params: jnp.ndarray,
-    cholesky_params: jnp.ndarray,
+    means: jnp.ndarray,
+    cholesky_diag: jnp.ndarray,
+    cholesky_off_diag: jnp.ndarray,
     state: _env.PlanningAgentSimulatorState,
     rollout_env: _env.PlanningAgentEnvironment,
     N: int,
@@ -41,21 +42,33 @@ def get_best_action(
     """
 
     # Get the dimension D from the mean parameters
-    D = mean_params.shape[0]
+    D = means.shape[0]
 
-    # Create an empty DxD matrix
-    cholesky_matrix = jnp.zeros((D, D))
+    # TODO: base key on timestep
+    random_key = random.PRNGKey(0)
+    # Split the key for subsequent operations to maintain functional purity
+    random_key, subkey = random.split(random_key)
 
-    # Get the indices for the lower triangle
-    tril_indices = jnp.tril_indices(D)
+    # Create cholesky matrix
+    cholesky_l = jnp.zeros((D, D))
 
-    # Fill the lower triangle with the cholesky parameters
-    cholesky_matrix = cholesky_matrix.at[tril_indices].set(cholesky_params)
+    # Fill the diagonal
+    cholesky_diag = jnp.maximum(cholesky_diag, 1e-6)  # Ensure positive definiteness
+    cholesky_l = cholesky_l.at[jnp.diag_indices(D)].set(cholesky_diag)
 
-    # Generate a random sample from the multivariate Gaussian distribution
-    random_key = random.key(0)  # TODO base seed on timestep
+    # Fill the lower triangle (excluding the diagonal)
+    cholesky_l = cholesky_l.at[jnp.tril_indices(D, -1)].set(cholesky_off_diag)
+
+    # Create the covariance matrix using the Cholesky factorization
+    covariance_matrix = jnp.dot(cholesky_l, cholesky_l.T)
+
+    # Ensure covariance matrix is positive definite by adding jitter
+    covariance_matrix = covariance_matrix + jnp.eye(D) * 1e-6
+
+    # Use the subkey for the sampling operation
+    random_key = subkey
     samples = random.multivariate_normal(
-        random_key, mean_params, cholesky_matrix, shape=(N,)
+        subkey, means, covariance_matrix, shape=(N,), method="svd"
     )
 
     num_params_per_poly = D // 2
@@ -121,9 +134,9 @@ def get_best_action(
     def select_action(
         params: Any, state: datatypes.SimulatorState, actor_state: Any, rng: jax.Array
     ):
-        # Get the current action sequence and index
+        # Get the current index for action
         action_index = actor_state["action_index"]
-        # params now contains a single action_sequence for one rollout
+        # params contains a single action_sequence for one rollout
         action_sequence = params["action_sequence"]
 
         # Get the current action
@@ -181,11 +194,23 @@ def get_best_action(
     # rollout_outputs will be a pytree structure where each leaf has an added dimension N at the beginning
     rollout_outputs = vmapped_rollout(rollout_keys, batched_actor_params)
 
-    # TODO: Evaluate the rollout_outputs (e.g., compute rewards/costs)
-    # and select the best action sequence. For now, returning a dummy action.
+    # Extract the overlap metric for all rollouts. Shape: (N, num_steps+1)
+    overlap_metrics = rollout_outputs.metrics["overlap"]
 
-    dummy_best_action = jnp.zeros(2)  # Placeholder
-    return dummy_best_action  # Replace with actual best action after evaluation
+    # Find the index of the rollout with the minimum overlap
+    # Sum the overlap metric over all timesteps for each rollout. Shape: (N,)
+    total_overlap_per_rollout = jnp.sum(overlap_metrics.value, axis=1)
+
+    # Find the index of the rollout with the minimum total overlap
+    min_overlap_index = jnp.argmin(total_overlap_per_rollout)
+
+    # Get the best action sequence corresponding to the minimum overlap
+    best_action_sequence = action_sequences[min_overlap_index]
+
+    # Return the first action from the best sequence
+    best_first_action = best_action_sequence[0]
+
+    return best_first_action
 
 
 jitted_get_best_action = jax.jit(get_best_action, static_argnames=["N", "rollout_env"])
