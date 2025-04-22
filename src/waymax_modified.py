@@ -279,8 +279,8 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             [
                 road_circogram.flatten(),
                 object_circogram.flatten(),
-                sdc_goal_distance.flatten(),
                 sdc_goal_angle.flatten(),
+                sdc_goal_distance.flatten(),
                 sdc_velocity_xy.flatten(),
                 sdc_offroad.flatten(),
             ],
