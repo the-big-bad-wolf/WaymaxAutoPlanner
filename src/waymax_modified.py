@@ -277,12 +277,12 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
 
         obs = jnp.concatenate(
             [
+                road_circogram.flatten(),
+                object_circogram.flatten(),
                 sdc_goal_distance.flatten(),
                 sdc_goal_angle.flatten(),
                 sdc_velocity_xy.flatten(),
                 sdc_offroad.flatten(),
-                road_circogram.flatten(),
-                object_circogram.flatten(),
             ],
             axis=-1,
         )
@@ -295,23 +295,22 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             Observation spec of the environment.
         """
         # Define dimensions for each observation component
-        MPC_action_dim = 2
+        road_circogram_dim = 64
+        object_circogram_dim = 64
         sdc_goal_angle_dim = 1
         sdc_goal_distance_dim = 1
         sdc_vel_dim = 2
         sdc_offroad_dim = 1
-        road_circogram_dim = 64
-        object_circogram_dim = 64
+        MPC_action_dim = 2
 
         # Total shape is the sum of all component dimensions
         total_dim = (
-            # MPC_action_dim
-            sdc_goal_angle_dim
+            road_circogram_dim
+            + object_circogram_dim
+            + sdc_goal_angle_dim
             + sdc_goal_distance_dim
             + sdc_vel_dim
             + sdc_offroad_dim
-            + road_circogram_dim
-            + object_circogram_dim
         )
 
         # Define min/max bounds for each component
@@ -341,24 +340,22 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
 
         # Combine all bounds
         min_bounds = jnp.array(
-            # MPC_action_min
-            sdc_goal_angle_min
+            road_circogram_min
+            + object_circogram_min
+            + sdc_goal_angle_min
             + sdc_goal_distance_min
             + sdc_vel_x_min
             + sdc_vel_y_min
             + sdc_offroad_min
-            + road_circogram_min
-            + object_circogram_min
         )
         max_bounds = jnp.array(
-            # MPC_action_max
-            sdc_goal_angle_max
+            road_circogram_max
+            + object_circogram_max
+            + sdc_goal_angle_max
             + sdc_goal_distance_max
             + sdc_vel_x_max
             + sdc_vel_y_max
             + sdc_offroad_max
-            + road_circogram_max
-            + object_circogram_max
         )
 
         return specs.BoundedArray(
