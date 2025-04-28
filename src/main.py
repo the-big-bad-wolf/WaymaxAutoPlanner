@@ -7,7 +7,7 @@ from skrl.resources.schedulers.jax import KLAdaptiveRL
 from skrl.trainers.jax import SequentialTrainer
 from waymax import agents
 from waymax import config as _config
-from waymax import dataloader, dynamics, metrics
+from waymax import dataloader, dynamics
 
 from models import Policy_Model, Value_Model
 from waymax_modified import WaymaxEnv
@@ -32,7 +32,6 @@ def setup_waymax():
     IDM_agent = agents.create_sim_agents_from_config(
         config=IDM_agent_config,
     )
-    print("Available metrics:", metrics.get_metric_names())
     metrics_config = _config.MetricsConfig(
         metrics_to_run=("sdc_progression", "offroad", "overlap")
     )
@@ -61,7 +60,7 @@ if __name__ == "__main__":
     config.jax.backend = "numpy"
 
     env, scenario_loader = setup_waymax()
-    env = WaymaxWrapper(env, scenario_loader)
+    env = WaymaxWrapper(env, scenario_loader, "bicycle")
 
     # instantiate a memory as rollout buffer
     mem_size = 16384
@@ -77,7 +76,7 @@ if __name__ == "__main__":
     cfg["rollouts"] = mem_size  # memory_size
     cfg["mini_batches"] = 2048
     cfg["random_timesteps"] = 0
-    cfg["entropy_loss_scale"] = 0.01
+    cfg["entropy_loss_scale"] = 0
     cfg["learning_rate_scheduler"] = KLAdaptiveRL
     cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.008}
 
@@ -90,10 +89,10 @@ if __name__ == "__main__":
     )
 
     # load the latest checkpoint (adjust the path as needed)
-    # agent.load("runs/25-04-20_02-49-08-770333_PPO/checkpoints/best_agent.pickle")
+    # agent.load("runs/25-04-22_20-09-58-568082_PPO/checkpoints/agent_300000.pickle")
 
     # configure and instantiate the RL trainer
-    cfg_trainer = {"timesteps": 2000000, "headless": True}
+    cfg_trainer = {"timesteps": 1000000, "headless": True}
     trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
     # start training
