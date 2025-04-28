@@ -46,6 +46,15 @@ def merged_reset(
 merged_reset = jit(merged_reset, static_argnums=(0,))
 
 
+def jerk_reward(
+    actions: jax.Array | np.ndarray, prev_actions: jax.Array | np.ndarray
+) -> jax.Array | np.ndarray:
+    """Calculate jerk reward based on the difference between the current and previous actions."""
+    accel_jerk = np.abs(actions[0][0] - prev_actions[0]) / 2
+    steering_jerk = np.abs(actions[0][1] - prev_actions[1]) / 2
+    return -1 * accel_jerk - 5 * steering_jerk
+
+
 class WaymaxWrapper(skrl_wrappers.Wrapper):
     def __init__(
         self,
@@ -88,14 +97,6 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         self._reward: float | None = None  # For rendering
         self._states: List[_env.PlanningAgentSimulatorState] = []  # For rendering
         self._rewards: List[float] = []  # For rendering
-
-    def jerk_reward(
-        self, actions: jax.Array | np.ndarray, prev_actions: jax.Array | np.ndarray
-    ) -> jax.Array | np.ndarray:
-        """Calculate jerk reward based on the difference between the current and previous actions."""
-        accel_jerk = np.abs(actions[0][0] - prev_actions[0]) / 2
-        steering_jerk = np.abs(actions[0][1] - prev_actions[1]) / 2
-        return -1 * accel_jerk - 5 * steering_jerk
 
     @override
     def reset(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
