@@ -68,8 +68,8 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         self._action_space_type = action_space_type
         if action_space_type == "polynomial_trajectory_sampling":
             # Configuration for the polynomial coefficients distribution
-            num_polys = 2  # Two cubic polynomials
-            poly_degree = 3
+            num_polys = 2
+            poly_degree = 2
             num_coeffs_per_poly = (
                 poly_degree + 1
             )  # 4 coefficients per polynomial (a, b, c, d)
