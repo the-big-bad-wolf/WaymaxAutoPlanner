@@ -84,6 +84,9 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             self._cholesky_offdiag_dim = (
                 self._mean_dim * (self._mean_dim - 1) // 2
             )  # 8*7/2 = 28 off-diagonal elements
+            self._current_action_sequence = jnp.zeros(
+                (30, num_polys), dtype=jnp.float32
+            )
 
         self._MPC_action: Tuple[float, float] = (
             0.0,
@@ -135,6 +138,10 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         :return: Observation, reward, terminated, truncated, info
         :rtype: tuple of np.ndarray or jax.Array and any other info
         """
+        # Check for NaN values in actions
+        if jnp.isnan(actions).any():
+            raise ValueError("Actions contain NaN values. Halting execution.")
+
         actions = actions.flatten()
 
         if self._action_space_type == "polynomial_trajectory_sampling":
@@ -148,9 +155,48 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             )
 
             # Get the best action from the Gaussian polynomial distribution
-            rl_accel, rl_steering = jitted_get_best_action(
-                means, cholesky_diag, cholesky_offdiag, self._state, self._env, 2
+            action_sequence = jitted_get_best_action(
+                means,
+                cholesky_diag,
+                cholesky_offdiag,
+                self._state,
+                self._current_action_sequence,
+                self._env,
+                10,
             )
+            rl_accel = action_sequence[0][0]
+            rl_steering = action_sequence[0][1]
+
+            # Shift the action sequence for the next step (receding horizon)
+            # Take the sequence from the second element onwards
+            shifted_sequence = action_sequence[1:]
+            # Create a zero action with the same shape and dtype as one action step
+            zero_action = jnp.zeros(
+                (1, action_sequence.shape[1]), dtype=action_sequence.dtype
+            )
+            # Update the stored sequence by appending the zero action
+            self._current_action_sequence = jnp.concatenate(
+                [shifted_sequence, zero_action], axis=0
+            )
+
+            # --- Visualization/Debug ---
+            # You can uncomment the following lines to visualize the planned action sequence.
+            # Be aware that plotting inside the step function can significantly slow down training/evaluation.
+            # import matplotlib.pyplot as plt
+
+            # plt.figure("Planned Action Sequence")
+            # plt.clf()  # Clear previous plot
+            # time_steps = np.arange(len(action_sequence)) * 0.1  # Get time steps
+            # plt.plot(time_steps, action_sequence[:, 0], label="Acceleration")
+            # plt.plot(time_steps, action_sequence[:, 1], label="Steering")
+            # plt.xlabel("Time (s)")
+            # plt.ylabel("Action Value")
+            # plt.title("Planned Action Sequence")
+            # plt.legend()
+            # plt.grid(True)
+            # plt.pause(0.01)  # Pause briefly to allow the plot to update
+            # plt.savefig("planned_action_sequence.png")  # Optionally save the plot
+            # --- End Visualization/Debug ---
 
         elif self._action_space_type == "bicycle":
             rl_accel, rl_steering = actions
@@ -164,8 +210,8 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         combined_steering = rl_steering  # + mpc_steering
 
         # Reshape for the environment step
-        combined_actions = np.array(
-            [[combined_accel, combined_steering]], dtype=np.float32
+        combined_actions = jnp.array(
+            [combined_accel, combined_steering], dtype=np.float32
         )
         self._state, observation, reward, terminated, truncated = merged_step(
             self._env, self._state, combined_actions  # type: ignore
@@ -176,7 +222,20 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         terminated = np.array(terminated).reshape(1, -1)
         truncated = np.array(truncated).reshape(1, -1)
 
-        # reward += self.jerk_reward(combined_actions, self._prev_action)
+        # Check for NaN values in observation
+        if np.isnan(observation).any():
+            raise ValueError("Observation contains NaN values. Halting execution.")
+        # Check for NaN values in reward
+        if np.isnan(reward).any():
+            raise ValueError("Reward contains NaN values. Halting execution.")
+        # Check for NaN values in terminated
+        if np.isnan(terminated).any():
+            raise ValueError("Terminated contains NaN values. Halting execution.")
+        # Check for NaN values in truncated
+        if np.isnan(truncated).any():
+            raise ValueError("Truncated contains NaN values. Halting execution.")
+
+        # reward += jerk_reward(combined_actions, self._prev_action)
         # self._prev_action = combined_actions[0]  # Update previous action
         self._reward = reward[0, 0]
         """
