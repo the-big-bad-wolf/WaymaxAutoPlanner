@@ -9,7 +9,7 @@ class Policy_Model(GaussianMixin, Model):
         observation_space,
         action_space,
         device=None,
-        clip_actions=False,
+        clip_actions=True,
         clip_log_std=True,
         min_log_std=-20,
         max_log_std=2,
@@ -78,7 +78,8 @@ class Policy_Model(GaussianMixin, Model):
         log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
 
         # Make sure the diagonal elements of the cholesky factor are non-negative (it is neccessary to also clip the outputted params as the the standard deviation in the training process may push them negative)
-        x = jnp.concatenate([x[:, :-8], nn.softplus(x[:, -8:])], axis=1)
+        # x = jnp.concatenate([x[:, :-6], nn.softplus(x[:, -6:])], axis=1)
+        x = nn.tanh(x)  # Apply tanh to the output
         return x, log_std, {}
 
 
