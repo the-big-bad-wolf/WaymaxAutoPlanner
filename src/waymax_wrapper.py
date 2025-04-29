@@ -178,25 +178,6 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
                 [shifted_sequence, zero_action], axis=0
             )
 
-            # --- Visualization/Debug ---
-            # You can uncomment the following lines to visualize the planned action sequence.
-            # Be aware that plotting inside the step function can significantly slow down training/evaluation.
-            # import matplotlib.pyplot as plt
-
-            # plt.figure("Planned Action Sequence")
-            # plt.clf()  # Clear previous plot
-            # time_steps = np.arange(len(action_sequence)) * 0.1  # Get time steps
-            # plt.plot(time_steps, action_sequence[:, 0], label="Acceleration")
-            # plt.plot(time_steps, action_sequence[:, 1], label="Steering")
-            # plt.xlabel("Time (s)")
-            # plt.ylabel("Action Value")
-            # plt.title("Planned Action Sequence")
-            # plt.legend()
-            # plt.grid(True)
-            # plt.pause(0.01)  # Pause briefly to allow the plot to update
-            # plt.savefig("planned_action_sequence.png")  # Optionally save the plot
-            # --- End Visualization/Debug ---
-
         elif self._action_space_type == "bicycle":
             rl_accel, rl_steering = actions
 
