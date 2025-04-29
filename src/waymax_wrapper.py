@@ -1,4 +1,6 @@
 # Description: Wrapper for Waymax environment to be compatible with skrl
+import glob
+import os
 import time
 from typing import Any, Iterator, List, Tuple, Union, override
 
@@ -11,6 +13,8 @@ import numpy as np
 import skrl.envs.wrappers.jax as skrl_wrappers
 from dm_env import specs
 from jax import jit
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 from waymax import datatypes
 from waymax import env as _env
 from waymax import visualization
@@ -61,47 +65,37 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         self,
         env: _env.PlanningAgentEnvironment,
         scenario_loader: Iterator[datatypes.SimulatorState],
-        action_space_type: str = "polynomial_trajectory_sampling",
+        action_space_type: str = "bicycle",
     ):
         super().__init__(env)
         self._env: _env.PlanningAgentEnvironment
         self._scenario_loader = scenario_loader
         self._random_key = jax.random.key(int(time.time()))
         self._action_space_type = action_space_type
-        if action_space_type == "polynomial_trajectory_sampling":
+        if action_space_type == "trajectory_sampling":
+            self._nr_rollouts = 20  # Number of trajectories to sample
+            self._horizon = 30  # Number of timesteps in the action sequence
             # Configuration for the polynomial coefficients distribution
             num_polys = 2
             poly_degree = 3
-            num_coeffs_per_poly = (
-                poly_degree + 1
-            )  # 4 coefficients per polynomial (a, b, c, d)
-            self._mean_dim = (
-                num_polys * num_coeffs_per_poly
-            )  # 8 dimensions for the mean vector
+            num_coeffs_per_poly = poly_degree + 1
+            self._mean_dim = num_polys * num_coeffs_per_poly
 
-            # Cholesky factor dimensions for the 8x8 covariance matrix
             self._cholesky_diag_dim = (
                 self._mean_dim  # 8 diagonal elements (parameterized as log-std)
             )
-            self._cholesky_offdiag_dim = (
-                self._mean_dim * (self._mean_dim - 1) // 2
-            )  # 8*7/2 = 28 off-diagonal elements
+            self._cholesky_offdiag_dim = self._mean_dim * (self._mean_dim - 1) // 2
             self._current_action_sequence = jnp.zeros(
-                (30, num_polys), dtype=jnp.float32
+                (self._horizon, num_polys), dtype=jnp.float32
             )
 
-        self._MPC_action: Tuple[float, float] = (
-            0.0,
-            0.0,
-        )  # For making MPC available as part of observation
+        self._MPC_action: Tuple[float, float] = (0.0, 0.0)
         self._prev_action: jax.Array | np.ndarray = np.zeros(
             (2,), dtype=np.float32
         )  # For jerk reward
 
-        self._state: _env.PlanningAgentSimulatorState | None = None  # For rendering
-        self._reward: float | None = None  # For rendering
-        self._states: List[_env.PlanningAgentSimulatorState] = []  # For rendering
-        self._rewards: List[float] = []  # For rendering
+        self._current_state: _env.PlanningAgentSimulatorState | None = None
+        self._current_reward: float | None = None  # For rendering
 
     @override
     def reset(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
@@ -111,7 +105,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         :rtype: np.ndarray or jax.Array and any other info
         """
         scenario = next(self._scenario_loader)
-        self._state, observation = merged_reset(self._env, scenario)
+        self._current_state, observation = merged_reset(self._env, scenario)
         observation = np.array(observation).reshape(1, -1)
 
         """"
@@ -146,7 +140,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
 
         actions = actions.flatten()
 
-        if self._action_space_type == "polynomial_trajectory_sampling":
+        if self._action_space_type == "trajectory_sampling":
             # Extract the mean and Cholesky parameters from the action vector
             means = jnp.array(actions[: self._mean_dim])
             cholesky_offdiag = jnp.array(
@@ -162,10 +156,10 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
                 means,
                 cholesky_diag,
                 cholesky_offdiag,
-                self._state,
+                self._current_state,
                 self._current_action_sequence,
                 self._env,
-                20,
+                self._nr_rollouts,
                 subkey,
             )
             rl_accel = action_sequence[0][0]
@@ -217,8 +211,8 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         combined_actions = jnp.array(
             [combined_accel, combined_steering], dtype=np.float32
         )
-        self._state, observation, reward, terminated, truncated = merged_step(
-            self._env, self._state, combined_actions  # type: ignore
+        self._current_state, observation, reward, terminated, truncated = merged_step(
+            self._env, self._current_state, combined_actions  # type: ignore
         )
 
         observation = np.array(observation).reshape(1, -1)
@@ -228,7 +222,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
 
         # reward += jerk_reward(combined_actions, self._prev_action)
         # self._prev_action = combined_actions[0]  # Update previous action
-        self._reward = reward[0, 0]
+        self._current_reward = reward[0, 0]
         """
         mpc_action = get_MPC_action(self._state)
         self._MPC_action = mpc_action
@@ -242,14 +236,36 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
     @override
     def render(self, *args, **kwargs) -> Any:
         """Store the state for video generation on close"""
-        self._states.append(self._state)  # type: ignore
-        self._rewards.append(self._reward)  # type: ignore
+        self._states = getattr(self, "_states", [])
+        self._rewards = getattr(self, "_rewards", [])
+        # Store the current state and reward for rendering
+        self._states.append(self._current_state)
+        self._rewards.append(self._current_reward)
+        # Store the current action sequence for visualization if needed
+        if self._action_space_type == "trajectory_sampling":
+            self._action_sequences = getattr(self, "_action_sequences", [])
+            self._action_sequences.append(self._current_action_sequence.copy())
 
     @override
     def close(self) -> None:
         """Close the environment"""
         if len(self._states) == 0:
             return
+
+        # Find the newest folder in runs/
+
+        runs_dir = "runs/"
+        os.makedirs(runs_dir, exist_ok=True)
+        run_folders = glob.glob(os.path.join(runs_dir, "*"))
+        if not run_folders:
+            newest_folder = os.path.join(runs_dir, "default")
+            os.makedirs(newest_folder, exist_ok=True)
+        else:
+            newest_folder = max(run_folders, key=os.path.getctime)
+
+        # Create video paths
+        waymax_video_path = os.path.join(newest_folder, "waymax.mp4")
+        action_seq_video_path = os.path.join(newest_folder, "action_sequences.mp4")
 
         imgs = []
         jit_observe = jit(datatypes.sdc_observation_from_state)
@@ -292,9 +308,83 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             )
             img = img_with_text
             imgs.append(img)
-        mediapy.write_video("./waymax.mp4", imgs, fps=10)
+        mediapy.write_video(waymax_video_path, imgs, fps=10)
         self._states.clear()
         self._rewards.clear()
+
+        if hasattr(self, "_action_sequences") and len(self._action_sequences) > 0:
+            try:
+                import matplotlib.pyplot as plt
+
+                action_seq_imgs = []
+                horizon = self._action_sequences[0].shape[
+                    0
+                ]  # Number of timesteps in sequence
+                time_steps = np.arange(horizon) * 0.1  # Assuming 10Hz (0.1s timestep)
+
+                # Determine appropriate y-axis limits
+                all_values = np.concatenate(
+                    [seq.flatten() for seq in self._action_sequences]
+                )
+                min_val, max_val = np.min(all_values), np.max(all_values)
+                y_margin = (max_val - min_val) * 0.1  # 10% margin
+                y_min, y_max = min_val - y_margin, max_val + y_margin
+
+                for i in range(len(self._action_sequences)):
+                    # Create a figure for this timestep's action sequence
+                    fig = Figure(figsize=(10, 6))
+                    canvas = FigureCanvasAgg(fig)
+                    ax = fig.add_subplot(111)
+
+                    # Plot acceleration and steering sequences
+                    ax.plot(
+                        time_steps,
+                        self._action_sequences[i][:, 0],
+                        "b-",
+                        label="Acceleration",
+                    )
+                    ax.plot(
+                        time_steps,
+                        self._action_sequences[i][:, 1],
+                        "r-",
+                        label="Steering",
+                    )
+
+                    # Add labels and title
+                    ax.set_xlabel("Horizon Time (s)")
+                    ax.set_ylabel("Action Value")
+                    ax.set_title(f"Planned Action Sequence - Step {i}")
+                    if i < len(self._rewards):
+                        ax.text(
+                            0.02,
+                            0.95,
+                            f"Reward: {self._rewards[i]:.4f}",
+                            transform=ax.transAxes,
+                            bbox=dict(facecolor="white", alpha=0.5),
+                        )
+                    ax.legend()
+                    ax.grid(True)
+
+                    # Set y-axis limits for consistent visualization
+                    ax.set_ylim(y_min, y_max)
+
+                    # Convert figure to image
+                    canvas.draw()
+                    img = np.array(canvas.renderer.buffer_rgba())
+                    img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+                    action_seq_imgs.append(img)
+
+                    # Close the figure to free memory
+                    plt.close(fig)
+
+                # Write video of action sequences
+                if action_seq_imgs:
+                    mediapy.write_video(action_seq_video_path, action_seq_imgs, fps=10)
+                    print(f"Action sequence video saved to '{action_seq_video_path}'")
+            except Exception as e:
+                print(f"Failed to generate action sequence video: {e}")
+
+            self._action_sequences.clear()
 
     @property
     def observation_space(self) -> gymnasium.Space:
@@ -311,7 +401,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
     def action_space(self) -> gymnasium.Space:
         """Action space"""
 
-        if self._action_space_type == "polynomial_trajectory_sampling":
+        if self._action_space_type == "trajectory_sampling":
             # Total dimension of the action space vector
             total_dim = (
                 self._mean_dim + self._cholesky_offdiag_dim + self._cholesky_diag_dim
