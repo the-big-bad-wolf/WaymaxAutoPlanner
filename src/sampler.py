@@ -21,12 +21,12 @@ def binom_jax(n, k):
 
 
 def _sample_distribution(
-    means: jnp.ndarray,
-    cholesky_diag: jnp.ndarray,
-    cholesky_off_diag: jnp.ndarray,
+    means: jax.Array,
+    cholesky_diag: jax.Array,
+    cholesky_off_diag: jax.Array,
     N: int,
-    key: jnp.ndarray,
-) -> jnp.ndarray:
+    key: jax.Array,
+) -> jax.Array:
     """Samples N points from a multivariate Gaussian distribution defined by Cholesky factors."""
     D = means.shape[0]
 
@@ -48,8 +48,8 @@ def _sample_distribution(
 
 
 def _evaluate_bernstein_polynomials(
-    samples: jnp.ndarray, num_steps: int, degree: int
-) -> jnp.ndarray:
+    samples: jax.Array, num_steps: int, degree: int
+) -> jax.Array:
     """Evaluates Bernstein polynomials based on sampled coefficients."""
     N, D = samples.shape
     num_params_per_poly = D // 2
@@ -89,11 +89,11 @@ def _evaluate_bernstein_polynomials(
 
 
 def _rollout_action_sequences(
-    action_sequences: jnp.ndarray,
+    action_sequences: jax.Array,
     initial_state: _env.PlanningAgentSimulatorState,
     rollout_env: _env.PlanningAgentEnvironment,
     num_steps: int,
-    rollout_keys: jnp.ndarray,
+    rollout_keys: jax.Array,
 ) -> _env.RolloutOutput:
     """Rolls out action sequences in the environment and returns outputs and metrics."""
 
@@ -140,16 +140,16 @@ def _rollout_action_sequences(
 
 
 def get_best_action(
-    means: jnp.ndarray,
-    cholesky_diag: jnp.ndarray,
-    cholesky_off_diag: jnp.ndarray,
+    means: jax.Array,
+    cholesky_diag: jax.Array,
+    cholesky_off_diag: jax.Array,
     state: _env.PlanningAgentSimulatorState,
-    current_action_sequence: jnp.ndarray,
+    current_action_sequence: jax.Array,
     rollout_env: _env.PlanningAgentEnvironment,
     N: int,
     horizon: float,
     random_key: jax.Array,
-) -> jnp.ndarray:
+) -> jax.Array:
     """Computes the best action sequence by sampling, evaluating polynomials, and rolling out.
 
     Args:
@@ -207,4 +207,6 @@ def get_best_action(
     return best_action_sequence
 
 
-jitted_get_best_action = jax.jit(get_best_action, static_argnames=["N", "rollout_env"])
+jitted_get_best_action = jax.jit(
+    get_best_action, static_argnames=["N", "rollout_env", "horizon"]
+)
