@@ -147,6 +147,7 @@ def get_best_action(
     current_action_sequence: jnp.ndarray,
     rollout_env: _env.PlanningAgentEnvironment,
     N: int,
+    horizon: float,
     random_key: jax.Array,
 ) -> jnp.ndarray:
     """Computes the best action sequence by sampling, evaluating polynomials, and rolling out.
@@ -156,8 +157,11 @@ def get_best_action(
         cholesky_diag: Diagonal elements of the Cholesky factor.
         cholesky_off_diag: Off-diagonal elements of the Cholesky factor (lower triangle).
         state: Current state.
+        current_action_sequence: Current action sequence to be evaluated.
         rollout_env: Environment to roll out the actions.
         N: Number of action sequences to sample and evaluate.
+        horizon: Planning horizon in seconds.
+        random_key: Random key for sampling.
 
     Returns:
         The best action sequence based on minimizing overlap during rollouts.
@@ -166,9 +170,8 @@ def get_best_action(
     num_params_per_poly = D // 2
     degree = num_params_per_poly - 1
 
-    dt = 0.1  # Timestep duration in seconds
-    horizon = 3.0  # Planning horizon in seconds
-    num_steps = int(round(horizon / dt))
+    DT = 0.1  # Timestep duration in seconds
+    num_steps = int(round(horizon / DT))
 
     # 1. Sample from the distribution
     key, subkey = random.split(random_key)

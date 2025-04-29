@@ -73,7 +73,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         self._random_key = jax.random.key(int(time.time()))
         self._action_space_type = action_space_type
         if action_space_type == "trajectory_sampling":
-            self._nr_rollouts = 20  # Number of trajectories to sample
+            self._nr_rollouts = 10  # Number of trajectories to sample
             self._horizon = 30  # Number of timesteps in the action sequence
             # Configuration for the polynomial coefficients distribution
             num_polys = 2
@@ -160,6 +160,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
                 self._current_action_sequence,
                 self._env,
                 self._nr_rollouts,
+                self._horizon,
                 subkey,
             )
             rl_accel = action_sequence[0][0]
