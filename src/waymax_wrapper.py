@@ -75,6 +75,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         if action_space_type == "trajectory_sampling":
             self._nr_rollouts = 10  # Number of trajectories to sample
             self._horizon = 30  # Number of timesteps in the action sequence
+            DT = 0.1  # Time step duration
             # Configuration for the polynomial coefficients distribution
             num_polys = 2
             poly_degree = 3
@@ -86,7 +87,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             )
             self._cholesky_offdiag_dim = self._mean_dim * (self._mean_dim - 1) // 2
             self._current_action_sequence = jnp.zeros(
-                (self._horizon, num_polys), dtype=jnp.float32
+                (int(round(self._horizon / DT)), num_polys), dtype=jnp.float32
             )
 
         self._MPC_action: Tuple[float, float] = (0.0, 0.0)
@@ -231,7 +232,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
     @override
     def close(self) -> None:
         """Close the environment"""
-        if len(self._states) == 0:
+        if not self._states:
             return
 
         # Find the newest folder in runs/
