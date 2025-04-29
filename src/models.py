@@ -77,9 +77,6 @@ class Policy_Model(GaussianMixin, Model):
         x = nn.Dense(self.num_actions)(x)  # type: ignore
         log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
 
-        # Make sure the diagonal elements of the cholesky factor are non-negative (it is neccessary to also clip the outputted params as the the standard deviation in the training process may push them negative)
-        # x = jnp.concatenate([x[:, :-6], nn.softplus(x[:, -6:])], axis=1)
-        x = nn.tanh(x)  # Apply tanh to the output
         return x, log_std, {}
 
 
