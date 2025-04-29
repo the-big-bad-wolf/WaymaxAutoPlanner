@@ -1,4 +1,5 @@
 # Description: Wrapper for Waymax environment to be compatible with skrl
+import time
 from typing import Any, Iterator, List, Tuple, Union, override
 
 import cv2
@@ -15,7 +16,7 @@ from waymax import env as _env
 from waymax import visualization
 
 from mpc import get_MPC_action
-from sampler import jitted_get_best_action, get_best_action
+from sampler import get_best_action, jitted_get_best_action
 
 
 def merged_step(
@@ -65,11 +66,12 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         super().__init__(env)
         self._env: _env.PlanningAgentEnvironment
         self._scenario_loader = scenario_loader
+        self._random_key = jax.random.key(int(time.time()))
         self._action_space_type = action_space_type
         if action_space_type == "polynomial_trajectory_sampling":
             # Configuration for the polynomial coefficients distribution
             num_polys = 2
-            poly_degree = 2
+            poly_degree = 3
             num_coeffs_per_poly = (
                 poly_degree + 1
             )  # 4 coefficients per polynomial (a, b, c, d)
@@ -155,6 +157,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             )
 
             # Get the best action from the Gaussian polynomial distribution
+            self._random_key, subkey = jax.random.split(self._random_key)
             action_sequence = jitted_get_best_action(
                 means,
                 cholesky_diag,
@@ -162,7 +165,8 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
                 self._state,
                 self._current_action_sequence,
                 self._env,
-                10,
+                20,
+                subkey,
             )
             rl_accel = action_sequence[0][0]
             rl_steering = action_sequence[0][1]
@@ -221,19 +225,6 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         reward = np.array(reward).reshape(1, -1)
         terminated = np.array(terminated).reshape(1, -1)
         truncated = np.array(truncated).reshape(1, -1)
-
-        # Check for NaN values in observation
-        if np.isnan(observation).any():
-            raise ValueError("Observation contains NaN values. Halting execution.")
-        # Check for NaN values in reward
-        if np.isnan(reward).any():
-            raise ValueError("Reward contains NaN values. Halting execution.")
-        # Check for NaN values in terminated
-        if np.isnan(terminated).any():
-            raise ValueError("Terminated contains NaN values. Halting execution.")
-        # Check for NaN values in truncated
-        if np.isnan(truncated).any():
-            raise ValueError("Truncated contains NaN values. Halting execution.")
 
         # reward += jerk_reward(combined_actions, self._prev_action)
         # self._prev_action = combined_actions[0]  # Update previous action

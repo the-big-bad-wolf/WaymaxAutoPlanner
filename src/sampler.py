@@ -147,6 +147,7 @@ def get_best_action(
     current_action_sequence: jnp.ndarray,
     rollout_env: _env.PlanningAgentEnvironment,
     N: int,
+    random_key: jax.Array,
 ) -> jnp.ndarray:
     """Computes the best action sequence by sampling, evaluating polynomials, and rolling out.
 
@@ -169,9 +170,6 @@ def get_best_action(
     horizon = 3.0  # Planning horizon in seconds
     num_steps = int(round(horizon / dt))
 
-    # TODO: base key on timestep or pass it in
-    random_key = random.key(101)
-
     # 1. Sample from the distribution
     key, subkey = random.split(random_key)
     samples = _sample_distribution(means, cholesky_diag, cholesky_off_diag, N, subkey)
@@ -192,22 +190,15 @@ def get_best_action(
     overlap_metrics = rollout_outputs.metrics["overlap"]
     total_overlap_per_rollout = jnp.sum(overlap_metrics.value, axis=1)
 
-    # Extract and sum the offroad metric
-    offroad_metrics = rollout_outputs.metrics["offroad"]
-    total_offroad_per_rollout = jnp.sum(offroad_metrics.value, axis=1)
-
-    # Extract and sum the progress metric
     progress_metrics = rollout_outputs.metrics["sdc_progression"]
     total_progress_per_rollout = jnp.sum(progress_metrics.value, axis=1)
-
-    total_offroad_and_overlap = total_offroad_per_rollout + total_overlap_per_rollout
 
     # Find the sequence with highest reward
     # rewards = rollout_outputs.reward
     # total_reward_per_rollout = jnp.sum(rewards, axis=-1)
 
     # 4. Find the best action sequence
-    best_index = jnp.argmin(total_offroad_per_rollout)
+    best_index = jnp.argmax(total_progress_per_rollout - total_overlap_per_rollout)
     best_action_sequence = action_sequences[best_index]
 
     return best_action_sequence
