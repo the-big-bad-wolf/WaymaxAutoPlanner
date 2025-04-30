@@ -74,7 +74,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         self._action_space_type = action_space_type
         if action_space_type == "trajectory_sampling":
             self._nr_rollouts = 10  # Number of trajectories to sample
-            self._horizon = 30  # Number of timesteps in the action sequence
+            self._horizon = 3  # Horizon in seconds
             DT = 0.1  # Time step duration
             # Configuration for the polynomial coefficients distribution
             num_polys = 2
