@@ -33,16 +33,12 @@ class Policy_Model(GaussianMixin, Model):
             road_circogram, (batch_size, -1, 1)
         )  # [batch, features, channels]
 
-        # Apply 5 convolutional layers with circular padding
-        x = nn.Conv(features=8, kernel_size=5, padding="CIRCULAR")(road_circogram)
+        # Apply 3 convolutional layers with circular padding
+        x = nn.Conv(features=64, kernel_size=15, padding="CIRCULAR")(road_circogram)
         x = nn.leaky_relu(x)
-        x = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x)
+        x = nn.Conv(features=96, kernel_size=9, padding="CIRCULAR")(x)
         x = nn.leaky_relu(x)
-        x = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x)
-        x = nn.leaky_relu(x)
-        x = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x)
-        x = nn.leaky_relu(x)
-        x = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x)
+        x = nn.Conv(features=128, kernel_size=3, padding="CIRCULAR")(x)
         x = nn.leaky_relu(x)
 
         # Reshape object_circogram for 1D convolution - add channel dimension
@@ -50,34 +46,29 @@ class Policy_Model(GaussianMixin, Model):
             object_circogram, (batch_size, -1, 1)
         )  # [batch, features, channels]
 
-        # Apply 5 convolutional layers with circular padding
-        x2 = nn.Conv(features=8, kernel_size=5, padding="CIRCULAR")(object_circogram)
+        # Apply 3 convolutional layers with circular padding
+        x2 = nn.Conv(features=64, kernel_size=15, padding="CIRCULAR")(object_circogram)
         x2 = nn.leaky_relu(x2)
-        x2 = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x2)
+        x2 = nn.Conv(features=96, kernel_size=9, padding="CIRCULAR")(x2)
         x2 = nn.leaky_relu(x2)
-        x2 = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x2)
-        x2 = nn.leaky_relu(x2)
-        x2 = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x2)
-        x2 = nn.leaky_relu(x2)
-        x2 = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x2)
+        x2 = nn.Conv(features=128, kernel_size=3, padding="CIRCULAR")(x2)
         x2 = nn.leaky_relu(x2)
 
         # Concatenate the outputs of the two branches
-        x = jnp.concatenate([x, x2], axis=1)
+        x = jnp.concatenate([x, x2], axis=-1)
 
         # Flatten output and concatenate with remaining features
         x = x.reshape(batch_size, -1)  # Flatten conv output
         x = jnp.concatenate([x, misc_features], axis=1)
 
         # Final MLP layers
-        x = nn.leaky_relu(nn.Dense(32)(x))
-        x = nn.leaky_relu(nn.Dense(32)(x))
-        x = nn.leaky_relu(nn.Dense(32)(x))
-        x = nn.leaky_relu(nn.Dense(32)(x))
+        x = nn.leaky_relu(nn.Dense(256)(x))
+        x = nn.leaky_relu(nn.Dense(256)(x))
+        x = nn.leaky_relu(nn.Dense(256)(x))
         x = nn.Dense(self.num_actions)(x)  # type: ignore
         log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
 
-        return x, log_std, {}
+        return nn.tanh(x), log_std, {}
 
 
 class Value_Model(DeterministicMixin, Model):
@@ -100,16 +91,12 @@ class Value_Model(DeterministicMixin, Model):
             road_circogram, (batch_size, -1, 1)
         )  # [batch, features, channels]
 
-        # Apply 5 convolutional layers with circular padding
-        x = nn.Conv(features=8, kernel_size=5, padding="CIRCULAR")(road_circogram)
+        # Apply 3 convolutional layers with circular padding
+        x = nn.Conv(features=64, kernel_size=15, padding="CIRCULAR")(road_circogram)
         x = nn.leaky_relu(x)
-        x = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x)
+        x = nn.Conv(features=96, kernel_size=9, padding="CIRCULAR")(x)
         x = nn.leaky_relu(x)
-        x = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x)
-        x = nn.leaky_relu(x)
-        x = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x)
-        x = nn.leaky_relu(x)
-        x = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x)
+        x = nn.Conv(features=128, kernel_size=3, padding="CIRCULAR")(x)
         x = nn.leaky_relu(x)
 
         # Reshape object_circogram for 1D convolution - add channel dimension
@@ -117,30 +104,25 @@ class Value_Model(DeterministicMixin, Model):
             object_circogram, (batch_size, -1, 1)
         )  # [batch, features, channels]
 
-        # Apply 5 convolutional layers with circular padding
-        x2 = nn.Conv(features=8, kernel_size=5, padding="CIRCULAR")(object_circogram)
+        # Apply 3 convolutional layers with circular padding
+        x2 = nn.Conv(features=64, kernel_size=15, padding="CIRCULAR")(object_circogram)
         x2 = nn.leaky_relu(x2)
-        x2 = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x2)
+        x2 = nn.Conv(features=96, kernel_size=9, padding="CIRCULAR")(x2)
         x2 = nn.leaky_relu(x2)
-        x2 = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x2)
-        x2 = nn.leaky_relu(x2)
-        x2 = nn.Conv(features=32, kernel_size=3, padding="CIRCULAR")(x2)
-        x2 = nn.leaky_relu(x2)
-        x2 = nn.Conv(features=16, kernel_size=3, padding="CIRCULAR")(x2)
+        x2 = nn.Conv(features=128, kernel_size=3, padding="CIRCULAR")(x2)
         x2 = nn.leaky_relu(x2)
 
         # Concatenate the outputs of the two branches
-        x = jnp.concatenate([x, x2], axis=1)
+        x = jnp.concatenate([x, x2], axis=-1)
 
         # Flatten output and concatenate with remaining features
         x = x.reshape(batch_size, -1)  # Flatten conv output
         x = jnp.concatenate([x, misc_features], axis=1)
 
         # Final MLP layers
-        x = nn.leaky_relu(nn.Dense(32)(x))
-        x = nn.leaky_relu(nn.Dense(32)(x))
-        x = nn.leaky_relu(nn.Dense(32)(x))
-        x = nn.leaky_relu(nn.Dense(32)(x))
+        x = nn.leaky_relu(nn.Dense(256)(x))
+        x = nn.leaky_relu(nn.Dense(256)(x))
+        x = nn.leaky_relu(nn.Dense(256)(x))
         x = nn.Dense(1)(x)
 
         return x, {}
