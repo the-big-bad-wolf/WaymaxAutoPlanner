@@ -68,7 +68,29 @@ class Policy_Model(GaussianMixin, Model):
         x = nn.Dense(self.num_actions)(x)  # type: ignore
         log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
 
-        return nn.tanh(x), log_std, {}
+        # Apply tanh to the output for bicycle action
+        # x = nn.tanh(x)
+
+        # Transform output to match trajectory sampling
+        # Split the output into three parts
+        x1 = x[:, :8]  # First 8 elements
+        x2 = x[:, 8:16]  # Next 8 elements
+        x3 = x[:, 16:]  # The rest
+
+        # Transform first 8 elements to be between -1 and 1 using tanh
+        x1 = nn.tanh(x1)
+
+        # Transform next 8 elements to be between 1e-5 and 0.4
+        # Apply sigmoid and scale
+        x2 = 1e-5 + nn.sigmoid(x2) * (0.4 - 1e-5)
+
+        # Transform the rest to be between -0.2 and 0.2
+        x3 = nn.tanh(x3) * 0.2
+
+        # Combine the transformed parts back together
+        x = jnp.concatenate([x1, x2, x3], axis=1)
+
+        return x, log_std, {}
 
 
 class Value_Model(DeterministicMixin, Model):

@@ -143,11 +143,16 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         if self._action_space_type == "trajectory_sampling":
             # Extract the mean and Cholesky parameters from the action vector
             means = jnp.array(actions[: self._mean_dim])
-            cholesky_offdiag = jnp.array(
-                actions[self._mean_dim : self._mean_dim + self._cholesky_offdiag_dim]
-            )
             cholesky_diag = jnp.array(
-                actions[self._mean_dim + self._cholesky_offdiag_dim :]
+                actions[self._mean_dim : self._mean_dim + self._cholesky_diag_dim]
+            )
+            cholesky_offdiag = jnp.array(
+                actions[
+                    self._mean_dim
+                    + self._cholesky_diag_dim : self._mean_dim
+                    + self._cholesky_diag_dim
+                    + self._cholesky_offdiag_dim
+                ]
             )
 
             # Get the best action from the Gaussian polynomial distribution
@@ -386,32 +391,32 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         if self._action_space_type == "trajectory_sampling":
             # Total dimension of the action space vector
             total_dim = (
-                self._mean_dim + self._cholesky_offdiag_dim + self._cholesky_diag_dim
+                self._mean_dim + self._cholesky_diag_dim + self._cholesky_offdiag_dim
             )
 
             # Define bounds for the action space components.
-            mean_min = np.full((self._mean_dim,), -np.inf, dtype=np.float32)
-            mean_max = np.full((self._mean_dim,), np.inf, dtype=np.float32)
-
-            cholesky_offdiag_min = np.full(
-                (self._cholesky_offdiag_dim,), -np.inf, dtype=np.float32
-            )
-            cholesky_offdiag_max = np.full(
-                (self._cholesky_offdiag_dim,), np.inf, dtype=np.float32
-            )
+            mean_min = np.full((self._mean_dim,), -1.0, dtype=np.float32)
+            mean_max = np.full((self._mean_dim,), 1.0, dtype=np.float32)
 
             cholesky_diag_min = np.full(
-                (self._cholesky_diag_dim,), 0.0, dtype=np.float32
+                (self._cholesky_diag_dim,), 1e-5, dtype=np.float32
             )
             cholesky_diag_max = np.full(
-                (self._cholesky_diag_dim,), np.inf, dtype=np.float32
+                (self._cholesky_diag_dim,), 0.4, dtype=np.float32
+            )
+
+            cholesky_offdiag_min = np.full(
+                (self._cholesky_offdiag_dim,), -0.2, dtype=np.float32
+            )
+            cholesky_offdiag_max = np.full(
+                (self._cholesky_offdiag_dim,), 0.2, dtype=np.float32
             )
 
             min_bounds = np.concatenate(
-                [mean_min, cholesky_offdiag_min, cholesky_diag_min], axis=0
+                [mean_min, cholesky_diag_min, cholesky_offdiag_min], axis=0
             )
             max_bounds = np.concatenate(
-                [mean_max, cholesky_offdiag_max, cholesky_diag_max], axis=0
+                [mean_max, cholesky_diag_max, cholesky_offdiag_max], axis=0
             )
 
             return gymnasium.spaces.Box(
