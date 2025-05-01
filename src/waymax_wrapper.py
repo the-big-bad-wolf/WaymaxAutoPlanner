@@ -75,20 +75,14 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         if action_space_type == "trajectory_sampling":
             self._nr_rollouts = 10  # Number of trajectories to sample
             self._horizon = 3  # Horizon in seconds
-            DT = 0.1  # Time step duration
+            self._DT = 0.1  # Time step duration
             # Configuration for the polynomial coefficients distribution
             num_polys = 2
             poly_degree = 3
             num_coeffs_per_poly = poly_degree + 1
             self._mean_dim = num_polys * num_coeffs_per_poly
-
-            self._cholesky_diag_dim = (
-                self._mean_dim  # 8 diagonal elements (parameterized as log-std)
-            )
+            self._cholesky_diag_dim = self._mean_dim
             self._cholesky_offdiag_dim = self._mean_dim * (self._mean_dim - 1) // 2
-            self._current_action_sequence = jnp.zeros(
-                (int(round(self._horizon / DT)), num_polys), dtype=jnp.float32
-            )
 
         self._MPC_action: Tuple[float, float] = (0.0, 0.0)
         self._prev_action: jax.Array | np.ndarray = np.zeros(
@@ -108,6 +102,11 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         scenario = next(self._scenario_loader)
         self._current_state, observation = merged_reset(self._env, scenario)
         observation = np.array(observation).reshape(1, -1)
+
+        if self._action_space_type == "trajectory_sampling":
+            self._current_action_sequence = jnp.zeros(
+                (int(round(self._horizon / self._DT)), 2), dtype=jnp.float32
+            )
 
         """"
         mpc_action = get_MPC_action(self._state)
