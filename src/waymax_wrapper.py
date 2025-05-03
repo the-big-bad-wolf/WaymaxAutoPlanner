@@ -66,12 +66,14 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         env: _env.PlanningAgentEnvironment,
         scenario_loader: Iterator[datatypes.SimulatorState],
         action_space_type: str = "bicycle",
+        MPC: bool = False,
     ):
         super().__init__(env)
         self._env: _env.PlanningAgentEnvironment
         self._scenario_loader = scenario_loader
         self._random_key = jax.random.key(int(time.time()))
         self._action_space_type = action_space_type
+        self._MPC = MPC
         if action_space_type == "trajectory_sampling":
             self._nr_rollouts = 10  # Number of trajectories to sample
             self._horizon = 3  # Horizon in seconds
@@ -84,13 +86,9 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             self._cholesky_diag_dim = self._mean_dim
             self._cholesky_offdiag_dim = self._mean_dim * (self._mean_dim - 1) // 2
 
-        self._MPC_action: Tuple[float, float] = (0.0, 0.0)
         self._prev_action: jax.Array | np.ndarray = np.zeros(
             (2,), dtype=np.float32
         )  # For jerk reward
-
-        self._current_state: _env.PlanningAgentSimulatorState | None = None
-        self._current_reward: float | None = None  # For rendering
 
     @override
     def reset(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
@@ -108,13 +106,10 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
                 (int(round(self._horizon / self._DT)), 2), dtype=jnp.float32
             )
 
-        """"
-        mpc_action = get_MPC_action(self._state)
-        self._MPC_action = mpc_action
-        mpc_action_array = np.array(mpc_action).reshape(1, 2)  # Convert to 1x2 array
-        # Prepend MPC actions to observation
-        observation = np.concatenate([mpc_action_array, observation], axis=1)
-        """
+        if self._MPC:
+            self._MPC_action = get_MPC_action(self._current_state)
+            mpc_action_array = np.array(self._MPC_action).reshape(1, 2)
+            observation = np.concatenate([observation, mpc_action_array], axis=1)
 
         return observation, {}
 
@@ -168,8 +163,8 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
                 self._horizon,
                 subkey,
             )
-            rl_accel = action_sequence[0][0]
-            rl_steering = action_sequence[0][1]
+            accel = action_sequence[0][0]
+            steering = action_sequence[0][1]
 
             # Shift the action sequence for the next step (receding horizon)
             # Take the sequence from the second element onwards
@@ -184,22 +179,20 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             )
 
         elif self._action_space_type == "bicycle":
-            rl_accel, rl_steering = actions
+            accel, steering = actions
 
         else:
             raise ValueError(f"Unknown action_space_type: {self._action_space_type}")
 
-        mpc_accel, mpc_steering = self._MPC_action
-
-        combined_accel = rl_accel  # + mpc_accel
-        combined_steering = rl_steering  # + mpc_steering
+        if self._MPC:
+            mpc_accel, mpc_steering = self._MPC_action
+            accel = accel + mpc_accel
+            steering = steering + mpc_steering
 
         # Reshape for the environment step
-        combined_actions = jnp.array(
-            [combined_accel, combined_steering], dtype=np.float32
-        )
+        action_array = jnp.array([accel, steering], dtype=np.float32)
         self._current_state, observation, reward, terminated, truncated = merged_step(
-            self._env, self._current_state, combined_actions  # type: ignore
+            self._env, self._current_state, action_array  # type: ignore
         )
 
         observation = np.array(observation).reshape(1, -1)
@@ -209,15 +202,13 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
 
         # reward += jerk_reward(combined_actions, self._prev_action)
         # self._prev_action = combined_actions[0]  # Update previous action
-        self._current_reward = reward[0, 0]
-        """
-        mpc_action = get_MPC_action(self._state)
-        self._MPC_action = mpc_action
-        mpc_action_array = np.array(mpc_action).reshape(1, 2)  # Convert to 1x2 array
-        # Prepend MPC actions to observation
-        observation = np.concatenate([mpc_action_array, observation], axis=1)
-        observation = observation.reshape(1, -1)
-        """
+        self._current_reward: float = reward[0, 0]
+
+        if self._MPC:
+            self._MPC_action = get_MPC_action(self._current_state)
+            mpc_action_array = np.array(self._MPC_action).reshape(1, 2)
+            observation = np.concatenate([observation, mpc_action_array], axis=1)
+
         return observation, reward, terminated, truncated, {}
 
     @override
@@ -377,6 +368,22 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
     def observation_space(self) -> gymnasium.Space:
         """The observation specs of this environment, without batch dimension."""
         observation_spec: specs.BoundedArray = self._env.observation_spec()
+
+        if self._MPC:
+            # Add MPC action to the observation space
+            # Assuming the MPC action is a 2D vector (acceleration, steering)
+            # and the original observation space is 3D
+            observation_spec = specs.BoundedArray(
+                shape=(observation_spec.shape[0] + 2,),
+                minimum=np.concatenate(
+                    [observation_spec.minimum, np.array([-1.0, -1.0])]
+                ),
+                maximum=np.concatenate(
+                    [observation_spec.maximum, np.array([1.0, 1.0])]
+                ),
+                dtype=observation_spec.dtype,
+            )
+
         return gymnasium.spaces.Box(
             shape=observation_spec.shape,  # type: ignore
             low=observation_spec.minimum,

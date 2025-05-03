@@ -9,7 +9,7 @@ class Policy_Model(GaussianMixin, Model):
         observation_space,
         action_space,
         device=None,
-        clip_actions=True,
+        clip_actions=False,
         clip_log_std=True,
         min_log_std=-20,
         max_log_std=2,
@@ -69,26 +69,26 @@ class Policy_Model(GaussianMixin, Model):
         log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
 
         # Apply tanh to the output for bicycle action
-        # x = nn.tanh(x)
+        x = nn.tanh(x)
 
         # Transform output to match trajectory sampling
         # Split the output into three parts
-        x1 = x[:, :8]  # First 8 elements
-        x2 = x[:, 8:16]  # Next 8 elements
-        x3 = x[:, 16:]  # The rest
+        # x1 = x[:, :8]  # First 8 elements
+        # x2 = x[:, 8:16]  # Next 8 elements
+        # x3 = x[:, 16:]  # The rest
 
         # Transform first 8 elements to be between -1 and 1 using tanh
-        x1 = nn.tanh(x1)
+        # x1 = nn.tanh(x1)
 
         # Transform next 8 elements to be between 1e-5 and 0.4
         # Apply sigmoid and scale
-        x2 = 1e-5 + nn.sigmoid(x2) * (0.4 - 1e-5)
+        # x2 = 1e-5 + nn.sigmoid(x2) * (0.4 - 1e-5)
 
         # Transform the rest to be between -0.2 and 0.2
-        x3 = nn.tanh(x3) * 0.2
+        # x3 = nn.tanh(x3) * 0.2
 
         # Combine the transformed parts back together
-        x = jnp.concatenate([x1, x2, x3], axis=1)
+        # x = jnp.concatenate([x1, x2, x3], axis=1)
 
         return x, log_std, {}
 

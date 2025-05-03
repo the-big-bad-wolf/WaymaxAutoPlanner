@@ -37,7 +37,7 @@ def setup_waymax():
         metrics_to_run=("sdc_progression", "offroad", "overlap")
     )
     reward_config = _config.LinearCombinationRewardConfig(
-        rewards={"sdc_progression": 1.0, "offroad": -10.0, "overlap": -20.0},
+        rewards={"sdc_progression": 1.0, "offroad": -20.0, "overlap": -20.0},
     )
     env_config = dataclasses.replace(
         _config.EnvironmentConfig(),
@@ -61,10 +61,10 @@ if __name__ == "__main__":
     config.jax.backend = "numpy"
 
     env, scenario_loader = setup_waymax()
-    env = WaymaxWrapper(env, scenario_loader, action_space_type="bicycle")
+    env = WaymaxWrapper(env, scenario_loader, action_space_type="bicycle", MPC=False)
 
     # instantiate a memory as rollout buffer
-    mem_size = 32768
+    mem_size = 16384
     memory = RandomMemory(memory_size=mem_size, num_envs=1)
 
     models = {}
@@ -75,9 +75,10 @@ if __name__ == "__main__":
 
     cfg = PPO_DEFAULT_CONFIG.copy()
     cfg["rollouts"] = mem_size  # memory_size
-    cfg["mini_batches"] = 4096
-    cfg["learning_epochs"] = 5
-    cfg["entropy_loss_scale"] = 1.0
+    cfg["mini_batches"] = 128
+    cfg["learning_epochs"] = 8
+    cfg["entropy_loss_scale"] = 0.01
+    # cfg["learning_rate"] = 3e-4
     cfg["learning_rate_scheduler"] = KLAdaptiveRL
     cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.008}
     cfg["state_preprocessor"] = RunningStandardScaler
@@ -94,16 +95,16 @@ if __name__ == "__main__":
     )
 
     # load the latest checkpoint (adjust the path as needed)
-    # agent.load("runs/25-04-29_01-28-33-710059_PPO/checkpoints/best_agent.pickle")
+    # agent.load("runs/25-05-02_03-22-44-582590_PPO/checkpoints/best_agent.pickle")
 
     # configure and instantiate the RL trainer
-    cfg_trainer = {"timesteps": 2000000, "headless": True}
+    cfg_trainer = {"timesteps": 1000000, "headless": True}
     trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
 
     # start training
     trainer.train()
 
-    # visualize the training
+    # visualize the agent
     trainer.timesteps = 1000
     trainer.headless = False
     trainer.eval()

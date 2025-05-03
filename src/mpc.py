@@ -134,6 +134,8 @@ def create_mpc_solver() -> casadi.Function:
     return mpc_fn
 
 
+compiled_mpc_solver = create_mpc_solver()
+
 jit_select = jax.jit(datatypes.select_by_onehot, static_argnums=(2))
 jit_observe_from_state = jax.jit(datatypes.sdc_observation_from_state)
 jit_transform_points = jax.jit(utils.transform_points)
@@ -175,7 +177,6 @@ def get_MPC_action(state: datatypes.SimulatorState) -> Tuple[float, float]:
         circogram = casadi.DM(road_circogram)
 
         # Call the function correctly
-        compiled_mpc_solver = create_mpc_solver()
         result = compiled_mpc_solver(params, circogram)
 
         # Extract results (must convert to scalar values)

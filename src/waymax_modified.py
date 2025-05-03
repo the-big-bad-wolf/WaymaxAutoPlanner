@@ -301,7 +301,6 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         sdc_goal_distance_dim = 1
         sdc_vel_dim = 2
         sdc_offroad_dim = 1
-        MPC_action_dim = 2
 
         # Total shape is the sum of all component dimensions
         total_dim = (
@@ -312,10 +311,6 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             + sdc_vel_dim
             + sdc_offroad_dim
         )
-
-        # Define min/max bounds for each component
-        MPC_action_min = [-1.0, -1.0]
-        MPC_action_max = [1.0, 1.0]
 
         sdc_goal_angle_min = [-jnp.pi]
         sdc_goal_angle_max = [jnp.pi]
