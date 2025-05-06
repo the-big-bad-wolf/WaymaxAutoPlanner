@@ -90,9 +90,8 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             self._cholesky_diag_dim = self._mean_dim
             self._cholesky_offdiag_dim = self._mean_dim * (self._mean_dim - 1) // 2
 
-            dynamics_model = dynamics.InvertibleBicycleModel(normalize_actions=True)
             constant_actor = agents.create_constant_speed_actor(
-                dynamics_model=dynamics_model,
+                dynamics_model=self._env._state_dynamics,
                 is_controlled_func=lambda state: ~state.object_metadata.is_sdc,
                 speed=None,
             )
@@ -105,7 +104,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
                 compute_reward=False,
             )
             self._rollout_env = WaymaxEnv(
-                dynamics_model=dynamics_model,
+                dynamics_model=dynamics.InvertibleBicycleModel(normalize_actions=True),
                 config=env_config,
                 sim_agent_actors=[constant_actor],
                 sim_agent_params=[{}],
