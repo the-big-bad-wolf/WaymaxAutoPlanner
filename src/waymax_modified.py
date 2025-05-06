@@ -129,9 +129,18 @@ def ray_segment_intersection(
 
 
 def circogram_subroutine(
-    i: int, initval: Tuple[jax.Array, jax.Array, Tuple[jax.Array, jax.Array], jax.Array]
+    i: int,
+    initval: Tuple[
+        jax.Array, jax.Array, jax.Array, Tuple[jax.Array, jax.Array], jax.Array
+    ],
 ):
-    circogram, ray_angles, (starting_points, dir_xy), candidate_mask = initval
+    (
+        circogram,
+        winning_indices,
+        ray_angles,
+        (starting_points, dir_xy),
+        candidate_mask,
+    ) = initval
     ray_angle = ray_angles[i]
 
     # Calculate intersection distances
@@ -142,19 +151,47 @@ def circogram_subroutine(
     # Only consider specified segments
     masked_distances = jnp.where(candidate_mask, intersection_distances, 100.0)
 
-    # Find minimum distance among candidate segments
+    # Find minimum distance and index among candidate segments
     min_distance = jnp.min(masked_distances)
+    # Use argmin, handle case where min is 100.0 (no valid hit)
+    winning_idx = jnp.argmin(masked_distances)
+    # If min_distance is 100.0, set index to -1
+    winning_idx = jnp.where(min_distance >= 100.0, -1, winning_idx)
 
-    # Update only the i-th circogram ray and return the whole array
+    # Update circogram ray and winning index
     circogram = circogram.at[i].set(min_distance)
-    return circogram, ray_angles, (starting_points, dir_xy), candidate_mask
+    winning_indices = winning_indices.at[i].set(winning_idx)
+
+    return (
+        circogram,
+        winning_indices,
+        ray_angles,
+        (starting_points, dir_xy),
+        candidate_mask,
+    )
 
 
 def create_road_circogram(
     observation: datatypes.Observation, num_rays: int
-) -> jax.Array:
+) -> Tuple[jax.Array, jax.Array, jax.Array]:
+    """Calculates the distances to the nearest road edge along rays.
+
+    Args:
+        observation: The observation data containing roadgraph information.
+        num_rays: The number of rays to cast for the circogram.
+
+    Returns:
+        A tuple containing:
+            - circogram: Array of distances to the nearest road edge for each ray.
+            - ray_radial_speed: Array of radial speeds (always 0 for static road edges).
+            - ray_tangential_speed: Array of tangential speeds (always 0 for static road edges).
+    """
     ray_angles = jnp.linspace(0, 2 * jnp.pi, num_rays, endpoint=False)
     circogram = jnp.full(num_rays, 100.0)  # Default max distance
+    winning_segment_indices = jnp.full(
+        num_rays, -1, dtype=jnp.int32
+    )  # Initialize winning indices
+
     rg_points = observation.roadgraph_static_points
     candidate_mask = rg_points.valid
     candidate_mask = candidate_mask & (
@@ -167,45 +204,88 @@ def create_road_circogram(
     dir_xy = jnp.stack([rg_points.dir_x, rg_points.dir_y], axis=1)
     line_segments = (starting_points, dir_xy)
 
-    (circogram, _, _, _) = jax.lax.fori_loop(
+    # Run loop with subroutine
+    (circogram, _, _, _, _) = jax.lax.fori_loop(
         0,
         num_rays,
         circogram_subroutine,
-        (circogram, ray_angles, line_segments, candidate_mask),
+        (circogram, winning_segment_indices, ray_angles, line_segments, candidate_mask),
     )
-    return circogram
+
+    # Road edges are static, so their velocities are always zero.
+    # We return zero speeds for consistency with create_object_circogram's output signature.
+    ray_radial_speed = jnp.zeros(num_rays)
+    ray_tangential_speed = jnp.zeros(num_rays)
+
+    return circogram, ray_radial_speed, ray_tangential_speed
 
 
 def create_object_circogram(
     observation: datatypes.Observation, num_rays: int
-) -> jax.Array:
+) -> Tuple[jax.Array, jax.Array, jax.Array]:
     ray_angles = jnp.linspace(0, 2 * jnp.pi, num_rays, endpoint=False)
     circogram = jnp.full(num_rays, 100.0)  # Default max distance
+    winning_segment_indices = jnp.full(num_rays, -1, dtype=jnp.int32)
 
+    # --- Prepare segments and mask ---
     candidate_mask = observation.trajectory.valid[..., 0, :, 0]
     candidate_mask = candidate_mask & ~observation.is_ego[..., 0, :]
     candidate_mask = jnp.repeat(
         candidate_mask, 4
     )  # (num_objects*4,) Each object has 4 segments
 
-    # Create line segments from object bounding box corners
     obj_corners = observation.trajectory.bbox_corners[0, :, 0, :, :]
     start_indices = jnp.array([0, 1, 2, 3])
     end_indices = jnp.array([1, 2, 3, 0])
-    start_points = obj_corners[:, start_indices]  # (num_objects, 4, 2)
-    end_points = obj_corners[:, end_indices]  # (num_objects, 4, 2)
-    segment_dirs = end_points - start_points  # (num_objects, 4, 2)
-    start_points = start_points.reshape(-1, 2)  # (num_objects*4, 2)
-    segment_dirs = segment_dirs.reshape(-1, 2)  # (num_objects*4, 2)
+    start_points = obj_corners[:, start_indices]
+    end_points = obj_corners[:, end_indices]
+    segment_dirs = end_points - start_points
+    start_points = start_points.reshape(-1, 2)
+    segment_dirs = segment_dirs.reshape(-1, 2)
     line_segments = (start_points, segment_dirs)
+    # --- End segment prep ---
 
-    (circogram, _, _, _) = jax.lax.fori_loop(
+    # --- Run loop with subroutine ---
+    (circogram, winning_segment_indices, _, _, _) = jax.lax.fori_loop(
         0,
         num_rays,
         circogram_subroutine,
-        (circogram, ray_angles, line_segments, candidate_mask),
+        (circogram, winning_segment_indices, ray_angles, line_segments, candidate_mask),
     )
-    return circogram
+    # --- End loop ---
+
+    # --- Map winning segment indices to velocities ---
+    object_indices = winning_segment_indices // 4  # Get object index from segment index
+    obj_vel_xy = observation.trajectory.vel_xy[0, :, 0, :]  # Shape: (num_objects, 2)
+
+    # Gather velocities based on object_indices, handle -1 for no hit
+    valid_object_hit = winning_segment_indices >= 0
+    # Use index 0 for invalid hits temporarily, mask results later
+    valid_object_indices = jnp.where(valid_object_hit, object_indices, 0)
+    hit_velocities = obj_vel_xy[valid_object_indices]  # Shape: (num_rays, 2)
+
+    # --- End velocity mapping ---
+
+    # --- Calculate Polar Velocities ---
+    # Get ray direction vectors
+    ray_dir_x = jnp.cos(ray_angles)
+    ray_dir_y = jnp.sin(ray_angles)
+
+    # Project hit velocities onto ray direction (radial speed)
+    radial_speed = hit_velocities[:, 0] * ray_dir_x + hit_velocities[:, 1] * ray_dir_y
+
+    # Project hit velocities onto direction perpendicular to the ray (tangential speed)
+    # Perpendicular vector: (-ray_dir_y, ray_dir_x)
+    tangential_speed = (
+        -hit_velocities[:, 0] * ray_dir_y + hit_velocities[:, 1] * ray_dir_x
+    )
+
+    # Apply mask for valid hits, setting speeds to 0.0 for non-hits
+    ray_radial_speed = jnp.where(valid_object_hit, radial_speed, 0.0)
+    ray_tangential_speed = jnp.where(valid_object_hit, tangential_speed, 0.0)
+    # --- End Polar Velocity Calculation ---
+
+    return circogram, ray_radial_speed, ray_tangential_speed
 
 
 class WaymaxEnv(_env.PlanningAgentEnvironment):
@@ -242,7 +322,6 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         """
         # Get base observation from SDC perspective first
         observation = datatypes.sdc_observation_from_state(state, roadgraph_top_k=1000)
-
         sdc_trajectory = datatypes.select_by_onehot(
             observation.trajectory,
             observation.is_ego,
@@ -272,13 +351,33 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         sdc_offroad = sdc_offroad.astype(jnp.float32)  # Convert boolean to float32
 
         num_rays = 64
-        road_circogram = create_road_circogram(observation, num_rays)
-        object_circogram = create_object_circogram(observation, num_rays)
+        road_circogram, road_radial, road_tangential = create_road_circogram(
+            observation, num_rays
+        )
+        object_circogram, object_radial, object_tangential = create_object_circogram(
+            observation, num_rays
+        )
+
+        # Take the minimum of road and object circograms at each angle
+        total_circogram = jnp.minimum(road_circogram, object_circogram)
+        # Determine which circogram (road or object) provided the minimum distance for each ray
+        object_is_closer = object_circogram < road_circogram
+
+        # Select the radial speed corresponding to the minimum distance
+        # If object is closer, use object_radial, otherwise use road_radial (which is 0)
+        total_radial_speed = jnp.where(object_is_closer, object_radial, road_radial)
+
+        # Select the tangential speed corresponding to the minimum distance
+        # If object is closer, use object_tangential, otherwise use road_tangential (which is 0)
+        total_tangential_speed = jnp.where(
+            object_is_closer, object_tangential, road_tangential
+        )
 
         obs = jnp.concatenate(
             [
-                road_circogram.flatten(),
-                object_circogram.flatten(),
+                total_circogram.flatten(),
+                total_radial_speed.flatten(),
+                total_tangential_speed.flatten(),
                 sdc_goal_angle.flatten(),
                 sdc_goal_distance.flatten(),
                 sdc_velocity_xy.flatten(),
@@ -294,63 +393,73 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         Returns:
             Observation spec of the environment.
         """
-        # Define dimensions for each observation component
-        road_circogram_dim = 64
-        object_circogram_dim = 64
+        # Define dimensions for each observation component based on observe method concatenation
+        num_rays = 64
+        total_circogram_dim = num_rays
+        total_radial_speed_dim = num_rays
+        total_tangential_speed_dim = num_rays
         sdc_goal_angle_dim = 1
         sdc_goal_distance_dim = 1
-        sdc_vel_dim = 2
+        sdc_vel_dim = 2  # (vx, vy)
         sdc_offroad_dim = 1
 
         # Total shape is the sum of all component dimensions
         total_dim = (
-            road_circogram_dim
-            + object_circogram_dim
+            total_circogram_dim
+            + total_radial_speed_dim
+            + total_tangential_speed_dim
             + sdc_goal_angle_dim
             + sdc_goal_distance_dim
             + sdc_vel_dim
             + sdc_offroad_dim
         )
 
+        # Define bounds for each component
+        total_circogram_min = [0.0] * total_circogram_dim
+        total_circogram_max = [100.0] * total_circogram_dim
+
+        # Speeds can be positive or negative, assuming max absolute speed of 30 m/s
+        total_radial_speed_min = [-30.0] * total_radial_speed_dim
+        total_radial_speed_max = [30.0] * total_radial_speed_dim
+        total_tangential_speed_min = [-30.0] * total_tangential_speed_dim
+        total_tangential_speed_max = [30.0] * total_tangential_speed_dim
+
         sdc_goal_angle_min = [-jnp.pi]
         sdc_goal_angle_max = [jnp.pi]
-        sdc_goal_distance_min = [0]
-        sdc_goal_distance_max = [250]
+        sdc_goal_distance_min = [0.0]
+        sdc_goal_distance_max = [250.0]  # Max distance observed
 
-        # Radial speed
-        sdc_vel_x_min = [-30]
-        sdc_vel_x_max = [30]
+        # SDC velocity bounds
+        sdc_vel_x_min = [-30.0]
+        sdc_vel_x_max = [30.0]
+        sdc_vel_y_min = [-9.0]  # Estimated max tangential speed is 9 m/s
+        sdc_vel_y_max = [9.0]
 
-        # Tangential speed. The limit is calculated based on a maximum absolute speed of 30 m/s
-        sdc_vel_y_min = [-9]
-        sdc_vel_y_max = [9]
+        sdc_offroad_min = [0.0]
+        sdc_offroad_max = [1.0]
 
-        sdc_offroad_min = [0]
-        sdc_offroad_max = [1]
-
-        road_circogram_min = [0] * road_circogram_dim
-        road_circogram_max = [100] * road_circogram_dim
-        object_circogram_min = [0] * object_circogram_dim
-        object_circogram_max = [100] * object_circogram_dim
-
-        # Combine all bounds
+        # Combine all bounds in the order of concatenation in the observe method
         min_bounds = jnp.array(
-            road_circogram_min
-            + object_circogram_min
+            total_circogram_min
+            + total_radial_speed_min
+            + total_tangential_speed_min
             + sdc_goal_angle_min
             + sdc_goal_distance_min
             + sdc_vel_x_min
             + sdc_vel_y_min
-            + sdc_offroad_min
+            + sdc_offroad_min,
+            dtype=jnp.float32,
         )
         max_bounds = jnp.array(
-            road_circogram_max
-            + object_circogram_max
+            total_circogram_max
+            + total_radial_speed_max
+            + total_tangential_speed_max
             + sdc_goal_angle_max
             + sdc_goal_distance_max
             + sdc_vel_x_max
             + sdc_vel_y_max
-            + sdc_offroad_max
+            + sdc_offroad_max,
+            dtype=jnp.float32,
         )
 
         return specs.BoundedArray(
