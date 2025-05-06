@@ -1,4 +1,5 @@
 # Description: Wrapper for Waymax environment to be compatible with skrl
+import dataclasses
 import glob
 import os
 import time
@@ -15,12 +16,15 @@ from dm_env import specs
 from jax import jit
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
-from waymax import datatypes
+from waymax import agents
+from waymax import config as _config
+from waymax import datatypes, dynamics
 from waymax import env as _env
 from waymax import visualization
 
 from mpc import get_MPC_action
 from sampler import get_best_action, jitted_get_best_action
+from waymax_modified import WaymaxEnv
 
 
 def merged_step(
@@ -85,6 +89,27 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             self._mean_dim = num_polys * num_coeffs_per_poly
             self._cholesky_diag_dim = self._mean_dim
             self._cholesky_offdiag_dim = self._mean_dim * (self._mean_dim - 1) // 2
+
+            dynamics_model = dynamics.InvertibleBicycleModel(normalize_actions=True)
+            constant_actor = agents.create_constant_speed_actor(
+                dynamics_model=dynamics_model,
+                is_controlled_func=lambda state: ~state.object_metadata.is_sdc,
+                speed=None,
+            )
+            metrics_config = _config.MetricsConfig(
+                metrics_to_run=("sdc_progression", "offroad", "overlap")
+            )
+            env_config = dataclasses.replace(
+                _config.EnvironmentConfig(),
+                metrics=metrics_config,
+                compute_reward=False,
+            )
+            self._rollout_env = WaymaxEnv(
+                dynamics_model=dynamics_model,
+                config=env_config,
+                sim_agent_actors=[constant_actor],
+                sim_agent_params=[{}],
+            )
 
         self._prev_action: jax.Array | np.ndarray = np.zeros(
             (2,), dtype=np.float32
@@ -158,7 +183,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
                 cholesky_offdiag,
                 self._current_state,
                 self._current_action_sequence,
-                self._env,
+                self._rollout_env,
                 self._nr_rollouts,
                 self._horizon,
                 subkey,
