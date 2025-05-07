@@ -399,9 +399,9 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         """
         # Define dimensions for each observation component based on observe method concatenation
         num_rays = 64
-        total_circogram_dim = num_rays
-        total_radial_speed_dim = num_rays
-        total_tangential_speed_dim = num_rays
+        circogram_dim = num_rays
+        radial_speed_dim = num_rays
+        tangential_speed_dim = num_rays
         sdc_goal_angle_dim = 1
         sdc_goal_distance_dim = 1
         sdc_vel_dim = 2  # (vx, vy)
@@ -409,9 +409,9 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
 
         # Total shape is the sum of all component dimensions
         total_dim = (
-            total_circogram_dim
-            + total_radial_speed_dim
-            + total_tangential_speed_dim
+            circogram_dim
+            + radial_speed_dim
+            + tangential_speed_dim
             + sdc_goal_angle_dim
             + sdc_goal_distance_dim
             + sdc_vel_dim
@@ -419,14 +419,14 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         )
 
         # Define bounds for each component
-        total_circogram_min = [0.0] * total_circogram_dim
-        total_circogram_max = [100.0] * total_circogram_dim
+        circogram_min = [0.0] * circogram_dim
+        circogram_max = [MAX_CIRCOGRAM_DIST] * circogram_dim
 
         # Speeds can be positive or negative, assuming max absolute speed of 30 m/s
-        total_radial_speed_min = [-30.0] * total_radial_speed_dim
-        total_radial_speed_max = [30.0] * total_radial_speed_dim
-        total_tangential_speed_min = [-30.0] * total_tangential_speed_dim
-        total_tangential_speed_max = [30.0] * total_tangential_speed_dim
+        radial_speed_min = [-30.0] * radial_speed_dim
+        radial_speed_max = [30.0] * radial_speed_dim
+        tangential_speed_min = [-30.0] * tangential_speed_dim
+        tangential_speed_max = [30.0] * tangential_speed_dim
 
         sdc_goal_angle_min = [-jnp.pi]
         sdc_goal_angle_max = [jnp.pi]
@@ -444,9 +444,9 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
 
         # Combine all bounds in the order of concatenation in the observe method
         min_bounds = jnp.array(
-            total_circogram_min
-            + total_radial_speed_min
-            + total_tangential_speed_min
+            circogram_min
+            + radial_speed_min
+            + tangential_speed_min
             + sdc_goal_angle_min
             + sdc_goal_distance_min
             + sdc_vel_x_min
@@ -455,9 +455,9 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             dtype=jnp.float32,
         )
         max_bounds = jnp.array(
-            total_circogram_max
-            + total_radial_speed_max
-            + total_tangential_speed_max
+            circogram_max
+            + radial_speed_max
+            + tangential_speed_max
             + sdc_goal_angle_max
             + sdc_goal_distance_max
             + sdc_vel_x_max
