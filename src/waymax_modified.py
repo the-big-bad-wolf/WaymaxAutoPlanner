@@ -11,6 +11,8 @@ from waymax import env as _env
 from waymax.env import typedefs as types
 from waymax.metrics.roadgraph import is_offroad
 
+MAX_CIRCOGRAM_DIST = 60.0
+
 
 def construct_SDC_route(
     state: _env.PlanningAgentSimulatorState,
@@ -86,7 +88,7 @@ def ray_segment_intersection(
         segment_dirs: Array of shape (N, 2) for segment directions (dx, dy).
 
     Returns:
-        Array of distances from origin to intersections. Returns 100.0 if no intersection.
+        Array of distances from origin to intersections. Returns MAX_CIRCOGRAM_DIST if no intersection.
     """
     # Calculate ray direction
     ray_dir_x = jnp.cos(ray_angle)
@@ -121,11 +123,11 @@ def ray_segment_intersection(
     # Distance from origin to intersection point
     distances = jnp.sqrt(ix**2 + iy**2)
 
-    # Make sure distances over 100 are not valid
-    valid_intersection = valid_intersection & (distances < 100.0)
+    # Make sure distances over MAX_CIRCOGRAM_DIST are not valid
+    valid_intersection = valid_intersection & (distances < MAX_CIRCOGRAM_DIST)
 
-    # Return distance if valid intersection, otherwise 100.0
-    return jnp.where(valid_intersection, distances, 100.0)
+    # Return distance if valid intersection, otherwise MAX_CIRCOGRAM_DIST
+    return jnp.where(valid_intersection, distances, MAX_CIRCOGRAM_DIST)
 
 
 def circogram_subroutine(
@@ -149,14 +151,16 @@ def circogram_subroutine(
     )
 
     # Only consider specified segments
-    masked_distances = jnp.where(candidate_mask, intersection_distances, 100.0)
+    masked_distances = jnp.where(
+        candidate_mask, intersection_distances, MAX_CIRCOGRAM_DIST
+    )
 
     # Find minimum distance and index among candidate segments
     min_distance = jnp.min(masked_distances)
-    # Use argmin, handle case where min is 100.0 (no valid hit)
+    # Use argmin, handle case where min is MAX_CIRCOGRAM_DIST (no valid hit)
     winning_idx = jnp.argmin(masked_distances)
-    # If min_distance is 100.0, set index to -1
-    winning_idx = jnp.where(min_distance >= 100.0, -1, winning_idx)
+    # If min_distance is MAX_CIRCOGRAM_DIST, set index to -1
+    winning_idx = jnp.where(min_distance >= MAX_CIRCOGRAM_DIST, -1, winning_idx)
 
     # Update circogram ray and winning index
     circogram = circogram.at[i].set(min_distance)
@@ -187,7 +191,7 @@ def create_road_circogram(
             - ray_tangential_speed: Array of tangential speeds (always 0 for static road edges).
     """
     ray_angles = jnp.linspace(0, 2 * jnp.pi, num_rays, endpoint=False)
-    circogram = jnp.full(num_rays, 100.0)  # Default max distance
+    circogram = jnp.full(num_rays, MAX_CIRCOGRAM_DIST)  # Default max distance
     winning_segment_indices = jnp.full(
         num_rays, -1, dtype=jnp.int32
     )  # Initialize winning indices
@@ -224,7 +228,7 @@ def create_object_circogram(
     observation: datatypes.Observation, num_rays: int
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:
     ray_angles = jnp.linspace(0, 2 * jnp.pi, num_rays, endpoint=False)
-    circogram = jnp.full(num_rays, 100.0)  # Default max distance
+    circogram = jnp.full(num_rays, MAX_CIRCOGRAM_DIST)  # Default max distance
     winning_segment_indices = jnp.full(num_rays, -1, dtype=jnp.int32)
 
     # --- Prepare segments and mask ---
