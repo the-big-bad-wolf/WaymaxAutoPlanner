@@ -44,43 +44,47 @@ class Policy_Model(GaussianMixin, Model):
             [circogram, circogram_radial_speed, circogram_tangential_speed], axis=2
         )
 
-        # Apply 3 convolutional layers with circular padding
-        x = nn.Conv(features=64, kernel_size=15, padding="CIRCULAR")(circogram_combined)
-        x = nn.leaky_relu(x)
-        x = nn.Conv(features=128, kernel_size=3, padding="CIRCULAR")(x)
-        x = nn.leaky_relu(x)
+        # Apply convolutional layers with circular padding
+        x1 = nn.leaky_relu(
+            nn.Conv(features=32, kernel_size=15, padding="CIRCULAR", strides=5)(
+                circogram_combined
+            )
+        )
+        x2 = nn.leaky_relu(
+            nn.Conv(features=8, kernel_size=3, padding="CIRCULAR")(circogram_combined)
+        )
 
-        # Flatten output and concatenate with remaining features
-        x = x.reshape(batch_size, -1)  # Flatten conv output
+        # Concatenate the outputs of the two convolutional layers
+        x1 = x1.reshape(batch_size, -1)  # Flatten conv output
+        x2 = x2.reshape(batch_size, -1)
+        x = jnp.concatenate([x1, x2], axis=1)
+
+        # Concatenate with remaining features
         x = jnp.concatenate([x, misc_features], axis=1)
 
         # Final MLP layers
-        x = nn.leaky_relu(nn.Dense(64)(x))
-        x = nn.leaky_relu(nn.Dense(64)(x))
+        x = nn.leaky_relu(nn.Dense(96)(x))
+        x = nn.leaky_relu(nn.Dense(96)(x))
         x = nn.Dense(self.num_actions)(x)  # type: ignore
         log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
 
         # Apply tanh to the output for bicycle action
-        x = nn.tanh(x)
+        # x = nn.tanh(x)
 
         # Transform output to match trajectory sampling
         # Split the output into three parts
-        # x1 = x[:, :8]  # First 8 elements
-        # x2 = x[:, 8:16]  # Next 8 elements
-        # x3 = x[:, 16:]  # The rest
+        x1 = x[:, :8]  # Mean values
+        x2 = x[:, 8:16]  # Diagonal elements
+        x3 = x[:, 16:]  # Off-diagonal elements
 
-        # Transform first 8 elements to be between -1 and 1 using tanh
-        # x1 = nn.tanh(x1)
+        # Transform first means to be between -1 and 1 using tanh
+        x1 = nn.tanh(x1)
 
-        # Transform next 8 elements to be between 1e-5 and 0.4
-        # Apply sigmoid and scale
-        # x2 = 1e-5 + nn.sigmoid(x2) * (0.4 - 1e-5)
-
-        # Transform the rest to be between -0.2 and 0.2
-        # x3 = nn.tanh(x3) * 0.2
+        # Transform the diagonal elements to be positive using softplus
+        x2 = nn.softplus(x2)
 
         # Combine the transformed parts back together
-        # x = jnp.concatenate([x1, x2, x3], axis=1)
+        x = jnp.concatenate([x1, x2, x3], axis=1)
 
         return x, log_std, {}
 
@@ -115,19 +119,84 @@ class Value_Model(DeterministicMixin, Model):
             [circogram, circogram_radial_speed, circogram_tangential_speed], axis=2
         )
 
-        # Apply 3 convolutional layers with circular padding
-        x = nn.Conv(features=64, kernel_size=15, padding="CIRCULAR")(circogram_combined)
-        x = nn.leaky_relu(x)
-        x = nn.Conv(features=128, kernel_size=3, padding="CIRCULAR")(x)
-        x = nn.leaky_relu(x)
+        # Apply convolutional layers with circular padding
+        x1 = nn.leaky_relu(
+            nn.Conv(features=32, kernel_size=15, padding="CIRCULAR", strides=5)(
+                circogram_combined
+            )
+        )
+        x2 = nn.leaky_relu(
+            nn.Conv(features=8, kernel_size=3, padding="CIRCULAR")(circogram_combined)
+        )
 
-        # Flatten output and concatenate with remaining features
-        x = x.reshape(batch_size, -1)  # Flatten conv output
+        # Concatenate the outputs of the two convolutional layers
+        x1 = x1.reshape(batch_size, -1)  # Flatten conv output
+        x2 = x2.reshape(batch_size, -1)
+        x = jnp.concatenate([x1, x2], axis=1)
+
+        # Concatenate with remaining features
         x = jnp.concatenate([x, misc_features], axis=1)
 
         # Final MLP layers
-        x = nn.leaky_relu(nn.Dense(64)(x))
-        x = nn.leaky_relu(nn.Dense(64)(x))
+        x = nn.leaky_relu(nn.Dense(96)(x))
+        x = nn.leaky_relu(nn.Dense(96)(x))
         x = nn.Dense(1)(x)
 
+        return x, {}
+
+
+class Critic_Model(DeterministicMixin, Model):
+    def __init__(
+        self, observation_space, action_space, device=None, clip_actions=False, **kwargs
+    ):
+        Model.__init__(self, observation_space, action_space, device, **kwargs)
+        DeterministicMixin.__init__(self, clip_actions)
+
+    @nn.compact
+    def __call__(self, inputs, role):
+        num_rays = 64
+        circogram = inputs["states"][:, 0:num_rays]
+        circogram_radial_speed = inputs["states"][:, num_rays : 2 * num_rays]
+        circogram_tangential_speed = inputs["states"][:, 2 * num_rays : 3 * num_rays]
+        misc_features = inputs["states"][:, 3 * num_rays :]
+        taken_actions = inputs["taken_actions"]
+        misc_features = jnp.concatenate([misc_features, taken_actions], axis=-1)
+
+        # Reshape each circogram component to add a channel dimension
+        batch_size = inputs["states"].shape[0]
+        circogram = jnp.reshape(circogram, (batch_size, num_rays, 1))
+        circogram_radial_speed = jnp.reshape(
+            circogram_radial_speed, (batch_size, num_rays, 1)
+        )
+        circogram_tangential_speed = jnp.reshape(
+            circogram_tangential_speed, (batch_size, num_rays, 1)
+        )
+
+        # Shape becomes [batch, num_rays, 3]
+        circogram_combined = jnp.concatenate(
+            [circogram, circogram_radial_speed, circogram_tangential_speed], axis=2
+        )
+
+        # Apply convolutional layers with circular padding
+        x1 = nn.leaky_relu(
+            nn.Conv(features=32, kernel_size=15, padding="CIRCULAR", strides=5)(
+                circogram_combined
+            )
+        )
+        x2 = nn.leaky_relu(
+            nn.Conv(features=8, kernel_size=3, padding="CIRCULAR")(circogram_combined)
+        )
+
+        # Concatenate the outputs of the two convolutional layers
+        x1 = x1.reshape(batch_size, -1)  # Flatten conv output
+        x2 = x2.reshape(batch_size, -1)
+        x = jnp.concatenate([x1, x2], axis=1)
+
+        # Concatenate with remaining features
+        x = jnp.concatenate([x, misc_features], axis=1)
+
+        # Final MLP layers
+        x = nn.leaky_relu(nn.Dense(96)(x))
+        x = nn.leaky_relu(nn.Dense(96)(x))
+        x = nn.Dense(1)(x)
         return x, {}
