@@ -30,20 +30,19 @@ def _sample_distribution(
     """Samples N points from a multivariate Gaussian distribution defined by Cholesky factors."""
     D = means.shape[0]
 
-    # Create cholesky matrix
+    # Create cholesky matrix L
     cholesky_l = jnp.zeros((D, D))
-    cholesky_diag = jnp.maximum(cholesky_diag, 1e-5)  # Ensure positive definiteness
+    # Ensure diagonal elements are positive to maintain positive definiteness
+    cholesky_diag = jnp.maximum(cholesky_diag, 1e-6)
+    # Set the diagonal and lower triangular elements
     cholesky_l = cholesky_l.at[jnp.diag_indices(D)].set(cholesky_diag)
     cholesky_l = cholesky_l.at[jnp.tril_indices(D, -1)].set(cholesky_off_diag)
 
-    # Create the covariance matrix using the Cholesky factorization
-    covariance_matrix = jnp.dot(cholesky_l, cholesky_l.T)
-    covariance_matrix = covariance_matrix + jnp.eye(D) * 1e-6  # Add jitter
+    # Sample from a standard normal distribution (mean 0, identity covariance)
+    standard_normal_samples = random.normal(key, shape=(N, D))
+    # Transform the samples: X = mu + L @ z^T
+    samples = means + jnp.dot(standard_normal_samples, cholesky_l.T)
 
-    # Sample from the distribution
-    samples = random.multivariate_normal(
-        key, means, covariance_matrix, shape=(N,), method="svd"
-    )
     return samples
 
 
@@ -189,19 +188,13 @@ def get_best_action(
     rollout_outputs = _rollout_action_sequences(
         action_sequences, state, rollout_env, num_steps, rollout_keys
     )
-    # Extract and sum the overlap metric
-    overlap_metrics = rollout_outputs.metrics["overlap"]
-    total_overlap_per_rollout = jnp.sum(overlap_metrics.value, axis=1)
-
-    progress_metrics = rollout_outputs.metrics["sdc_progression"]
-    total_progress_per_rollout = jnp.sum(progress_metrics.value, axis=1)
 
     # Find the sequence with highest reward
-    # rewards = rollout_outputs.reward
-    # total_reward_per_rollout = jnp.sum(rewards, axis=-1)
+    rewards = rollout_outputs.reward
+    total_reward_per_rollout = jnp.sum(rewards, axis=-1)
 
     # 4. Find the best action sequence
-    best_index = jnp.argmax(total_progress_per_rollout - total_overlap_per_rollout)
+    best_index = jnp.argmax(total_reward_per_rollout)
     best_action_sequence = action_sequences[best_index]
 
     return best_action_sequence
