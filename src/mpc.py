@@ -8,8 +8,6 @@ import waymax.utils.geometry as utils
 from casadi import external
 from waymax import datatypes
 
-from waymax_modified import create_road_circogram
-
 
 def create_mpc_solver() -> casadi.Function:
     """
@@ -71,9 +69,6 @@ def create_mpc_solver() -> casadi.Function:
         # State constraints
         opti.subject_to(opti.bounded(0.0, speed[i + 1], MAX_SPEED))
 
-    # Add circogram parameter for obstacle distances
-    circogram = opti.parameter(64)  # 64 ray measurements
-
     # Simplified objective function
     distance_to_goal = (x[N] - target_x) ** 2 + (y[N] - target_y) ** 2  # Terminal cost
     control_effort = casadi.sum1(accel**2 + 5.0 * steering**2)  # Control regularization
@@ -94,9 +89,9 @@ def create_mpc_solver() -> casadi.Function:
     # Create a CasADi function
     mpc_fn = opti.to_function(
         "mpc_solver",
-        [params, circogram],
+        [params],
         [accel[0], steering[0]],
-        ["params", "circogram"],
+        ["params"],
         ["optimal_accel", "optimal_steering"],
     )
 
@@ -139,7 +134,6 @@ compiled_mpc_solver = create_mpc_solver()
 jit_select = jax.jit(datatypes.select_by_onehot, static_argnums=(2))
 jit_observe_from_state = jax.jit(datatypes.sdc_observation_from_state)
 jit_transform_points = jax.jit(utils.transform_points)
-jit_create_road_circogram = jax.jit(create_road_circogram, static_argnums=(1))
 
 
 def get_MPC_action(state: datatypes.SimulatorState) -> Tuple[float, float]:
@@ -167,17 +161,13 @@ def get_MPC_action(state: datatypes.SimulatorState) -> Tuple[float, float]:
     target_x = float(sdc_xy_goal[0])
     target_y = float(sdc_xy_goal[1])
 
-    num_rays = 64
-    road_circogram = jit_create_road_circogram(observation, num_rays)
-
     try:
         params = casadi.DM(
             [start_x, start_y, start_yaw, start_speed, target_x, target_y]
         )
-        circogram = casadi.DM(road_circogram)
 
         # Call the function correctly
-        result = compiled_mpc_solver(params, circogram)
+        result = compiled_mpc_solver(params)
 
         # Extract results (must convert to scalar values)
         optimal_accel = float(result[0])
