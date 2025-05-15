@@ -59,9 +59,9 @@ def jerk_reward(
     actions: jax.Array | np.ndarray, prev_actions: jax.Array | np.ndarray
 ) -> jax.Array | np.ndarray:
     """Calculate jerk reward based on the difference between the current and previous actions."""
-    accel_jerk = np.abs(actions[0][0] - prev_actions[0]) / 2
-    steering_jerk = np.abs(actions[0][1] - prev_actions[1]) / 2
-    return -1 * accel_jerk - 5 * steering_jerk
+    accel_jerk = np.abs(actions[0] - prev_actions[0]) / 2
+    steering_jerk = np.abs(actions[1] - prev_actions[1]) / 2
+    return -0.1 * accel_jerk - 0.5 * steering_jerk
 
 
 class WaymaxWrapper(skrl_wrappers.Wrapper):
@@ -98,10 +98,14 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             metrics_config = _config.MetricsConfig(
                 metrics_to_run=("sdc_progression", "offroad", "overlap")
             )
+            reward_config = _config.LinearCombinationRewardConfig(
+                rewards={"sdc_progression": 1.0, "offroad": -1.0, "overlap": -2.0},
+            )
             env_config = dataclasses.replace(
                 _config.EnvironmentConfig(),
                 metrics=metrics_config,
-                compute_reward=False,
+                rewards=reward_config,
+                compute_reward=True,
             )
             self._rollout_env = WaymaxEnv(
                 dynamics_model=dynamics.InvertibleBicycleModel(normalize_actions=True),
@@ -224,8 +228,8 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         terminated = np.array(terminated).reshape(1, -1)
         truncated = np.array(truncated).reshape(1, -1)
 
-        # reward += jerk_reward(combined_actions, self._prev_action)
-        # self._prev_action = combined_actions[0]  # Update previous action
+        reward += jerk_reward(action_array, self._prev_action)
+        self._prev_action = action_array  # Update previous action
         self._current_reward: float = reward[0, 0]
 
         if self._MPC:
@@ -430,17 +434,17 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             mean_max = np.full((self._mean_dim,), 1.0, dtype=np.float32)
 
             cholesky_diag_min = np.full(
-                (self._cholesky_diag_dim,), 1e-5, dtype=np.float32
+                (self._cholesky_diag_dim,), 1e-6, dtype=np.float32
             )
             cholesky_diag_max = np.full(
-                (self._cholesky_diag_dim,), 0.4, dtype=np.float32
+                (self._cholesky_diag_dim,), np.inf, dtype=np.float32
             )
 
             cholesky_offdiag_min = np.full(
-                (self._cholesky_offdiag_dim,), -0.2, dtype=np.float32
+                (self._cholesky_offdiag_dim,), -np.inf, dtype=np.float32
             )
             cholesky_offdiag_max = np.full(
-                (self._cholesky_offdiag_dim,), 0.2, dtype=np.float32
+                (self._cholesky_offdiag_dim,), np.inf, dtype=np.float32
             )
 
             min_bounds = np.concatenate(
@@ -459,6 +463,13 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         elif self._action_space_type == "bicycle":
             # Original simple action space (e.g., acceleration, steering)
             action_spec: specs.BoundedArray = self._env.action_spec().data  # type: ignore
+            if self._MPC:
+                action_spec = specs.BoundedArray(
+                    shape=(action_spec.shape[0],),
+                    minimum=np.array([-2.0, -2.0]),
+                    maximum=np.array([2.0, 2.0]),
+                    dtype=action_spec.dtype,
+                )
             return gymnasium.spaces.Box(
                 low=action_spec.minimum,
                 high=action_spec.maximum,
