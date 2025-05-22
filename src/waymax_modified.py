@@ -11,7 +11,9 @@ from waymax import env as _env
 from waymax.env import typedefs as types
 from waymax.metrics.roadgraph import is_offroad
 
-MAX_CIRCOGRAM_DIST = 60.0
+NUM_RAYS = 64  # Number of rays for the circogram
+MAX_CIRCOGRAM_DIST = 60.0  # Maximum distance for the circogram (meters)
+Z_TOLERANCE = 3.0  # Filter out objects and road graph points that are on a different height (meters)
 
 
 def construct_SDC_route(
@@ -203,6 +205,18 @@ def create_road_circogram(
         | (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_MEDIAN)
         | (rg_points.types == datatypes.MapElementIds.ROAD_EDGE_UNKNOWN)
     )
+    sdc_trajectory = datatypes.select_by_onehot(
+        observation.trajectory,
+        observation.is_ego,
+        keepdims=False,
+    )
+    # Get SDC's current z-coordinate
+    sdc_z = sdc_trajectory.z[..., 0, 0]
+
+    z_diff = jnp.abs(rg_points.z - sdc_z)
+    on_same_plane = z_diff <= Z_TOLERANCE
+    candidate_mask = candidate_mask & on_same_plane
+
     # Create line segments from roadgraph points
     starting_points = jnp.stack([rg_points.x, rg_points.y], axis=1)
     dir_xy = jnp.stack([rg_points.dir_x, rg_points.dir_y], axis=1)
@@ -234,6 +248,19 @@ def create_object_circogram(
     # --- Prepare segments and mask ---
     candidate_mask = observation.trajectory.valid[..., 0, :, 0]
     candidate_mask = candidate_mask & ~observation.is_ego[..., 0, :]
+    # Filter objects based on z-plane
+    sdc_trajectory = datatypes.select_by_onehot(
+        observation.trajectory,
+        observation.is_ego,
+        keepdims=False,
+    )
+    # Get SDC's current z-coordinate
+    sdc_z = sdc_trajectory.z[..., 0, 0]
+    # Get z-coordinates of all objects at the current timestep
+    obj_z = observation.trajectory.z[..., 0, :, 0]  # Shape: (batch, num_objects)
+    z_diff = jnp.abs(obj_z - sdc_z)
+    on_same_plane = z_diff <= Z_TOLERANCE
+    candidate_mask = candidate_mask & on_same_plane
     candidate_mask = jnp.repeat(
         candidate_mask, 4
     )  # (num_objects*4,) Each object has 4 segments
@@ -354,12 +381,11 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         sdc_offroad = is_offroad(sdc_trajectory, observation.roadgraph_static_points)
         sdc_offroad = sdc_offroad.astype(jnp.float32)  # Convert boolean to float32
 
-        num_rays = 64
         road_circogram, road_radial, road_tangential = create_road_circogram(
-            observation, num_rays
+            observation, NUM_RAYS
         )
         object_circogram, object_radial, object_tangential = create_object_circogram(
-            observation, num_rays
+            observation, NUM_RAYS
         )
 
         # Take the minimum of road and object circograms at each angle
@@ -398,10 +424,9 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             Observation spec of the environment.
         """
         # Define dimensions for each observation component based on observe method concatenation
-        num_rays = 64
-        circogram_dim = num_rays
-        radial_speed_dim = num_rays
-        tangential_speed_dim = num_rays
+        circogram_dim = NUM_RAYS
+        radial_speed_dim = NUM_RAYS
+        tangential_speed_dim = NUM_RAYS
         sdc_goal_angle_dim = 1
         sdc_goal_distance_dim = 1
         sdc_vel_dim = 2  # (vx, vy)
