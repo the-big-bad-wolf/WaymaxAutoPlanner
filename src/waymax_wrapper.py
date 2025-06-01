@@ -30,18 +30,63 @@ from waymax_modified import WaymaxEnv
 def merged_step(
     env: _env.PlanningAgentEnvironment,
     state: _env.PlanningAgentSimulatorState,
-    actions: Union[np.ndarray, jax.Array],
+    actions: jax.Array,
 ):
-    action = datatypes.Action(data=actions.flatten(), valid=jnp.ones((1,), dtype=bool))  # type: ignore
+    action = datatypes.Action(data=actions.flatten(), valid=jnp.ones((1,), dtype=bool))
     new_state = env.step(state, action)
-    reward = env.reward(state, action).reshape(1, -1)
+    reward = env.reward(new_state, action).reshape(1, -1)
     observation = env.observe(new_state).reshape(1, -1)
     terminated = env.termination(new_state).reshape(1, -1)
     truncated = env.truncation(new_state).reshape(1, -1)
-    return new_state, observation, reward, terminated, truncated
+    metrics = env.metrics(new_state)
+    return new_state, observation, reward, terminated, truncated, metrics
 
 
 merged_step = jit(merged_step, static_argnums=(0,))
+
+
+def merged_multistep(
+    env: _env.PlanningAgentEnvironment,
+    state: _env.PlanningAgentSimulatorState,
+    actions: jax.Array,
+    num_steps: int,
+):
+    def body_fn(
+        i: int, carry: Tuple[_env.PlanningAgentSimulatorState, jax.Array]
+    ) -> Tuple[_env.PlanningAgentSimulatorState, jax.Array]:
+        current_state, cumulative_reward = carry
+
+        action_data = actions[i]
+        action = datatypes.Action(
+            data=action_data.flatten(), valid=jnp.ones((1,), dtype=bool)
+        )
+
+        reward_current_step = env.reward(current_state, action)
+        next_state = env.step(current_state, action)
+        cumulative_reward += reward_current_step
+
+        return next_state, cumulative_reward
+
+    # Initial carry: the starting state and zero cumulative reward
+    initial_carry = (state, jnp.array(0.0, dtype=jnp.float32))
+
+    # Loop over the number of steps
+    final_state, total_cumulative_reward = jax.lax.fori_loop(
+        0, num_steps, body_fn, initial_carry
+    )
+
+    # Get observation, termination, and truncation based on the final_state
+    observation = env.observe(final_state).reshape(1, -1)
+    terminated = env.termination(final_state).reshape(1, -1)
+    truncated = env.truncation(final_state).reshape(1, -1)
+
+    # Reshape total_cumulative_reward to be consistent (e.g., (1, 1))
+    total_cumulative_reward = total_cumulative_reward.reshape(1, -1)
+
+    return final_state, observation, total_cumulative_reward, terminated, truncated
+
+
+merged_multistep = jit(merged_multistep, static_argnums=(0, 3))
 
 
 def merged_reset(
@@ -55,13 +100,14 @@ def merged_reset(
 merged_reset = jit(merged_reset, static_argnums=(0,))
 
 
-def jerk_reward(
-    actions: jax.Array | np.ndarray, prev_actions: jax.Array | np.ndarray
-) -> jax.Array | np.ndarray:
+def jerk_reward(actions: jax.Array, prev_actions: jax.Array) -> jax.Array:
     """Calculate jerk reward based on the difference between the current and previous actions."""
-    accel_jerk = np.abs(actions[0] - prev_actions[0]) / 2
-    steering_jerk = np.abs(actions[1] - prev_actions[1]) / 2
+    accel_jerk = jnp.abs(actions[0] - prev_actions[0]) / 2
+    steering_jerk = jnp.abs(actions[1] - prev_actions[1]) / 2
     return -0.1 * accel_jerk - 0.5 * steering_jerk
+
+
+jitted_jerk_reward = jit(jerk_reward)
 
 
 class WaymaxWrapper(skrl_wrappers.Wrapper):
@@ -70,74 +116,112 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         env: _env.PlanningAgentEnvironment,
         scenario_loader: Iterator[datatypes.SimulatorState],
         action_space_type: str = "bicycle",
-        MPC: bool = False,
     ):
+        """
+        Initialize the Waymax wrapper.
+
+        Args:
+            env: The Waymax planning agent environment.
+            scenario_loader: Iterator providing simulator states.
+            action_space_type: One of "bicycle", "bicycle_mpc", or "trajectory_sampling".
+        """
         super().__init__(env)
         self._env: _env.PlanningAgentEnvironment
         self._scenario_loader = scenario_loader
         self._random_key = jax.random.key(int(time.time()))
         self._action_space_type = action_space_type
-        self._MPC = MPC
+        self._prev_action = jnp.zeros((2,), dtype=np.float32)  # For jerk reward
+
+        # Set up the appropriate step and reset methods based on action_space_type
         if action_space_type == "trajectory_sampling":
-            self._nr_rollouts = 10  # Number of trajectories to sample
-            self._horizon = 3  # Horizon in seconds
-            self._DT = 0.1  # Time step duration
-            # Configuration for the polynomial coefficients distribution
-            num_polys = 2
-            poly_degree = 3
-            num_coeffs_per_poly = poly_degree + 1
-            self._mean_dim = num_polys * num_coeffs_per_poly
-            self._cholesky_diag_dim = self._mean_dim
-            self._cholesky_offdiag_dim = self._mean_dim * (self._mean_dim - 1) // 2
-
-            constant_actor = agents.create_constant_speed_actor(
-                dynamics_model=self._env._state_dynamics,
-                is_controlled_func=lambda state: ~state.object_metadata.is_sdc,
-                speed=None,
-            )
-            metrics_config = _config.MetricsConfig(
-                metrics_to_run=("sdc_progression", "offroad", "overlap")
-            )
-            reward_config = _config.LinearCombinationRewardConfig(
-                rewards={"sdc_progression": 1.0, "offroad": -1.0, "overlap": -2.0},
-            )
-            env_config = dataclasses.replace(
-                _config.EnvironmentConfig(),
-                metrics=metrics_config,
-                rewards=reward_config,
-                compute_reward=True,
-            )
-            self._rollout_env = WaymaxEnv(
-                dynamics_model=dynamics.InvertibleBicycleModel(normalize_actions=True),
-                config=env_config,
-                sim_agent_actors=[constant_actor],
-                sim_agent_params=[{}],
+            self._step_impl = self._step_trajectory_sampling
+            self._reset_impl = self._reset_trajectory_sampling
+            self._setup_trajectory_sampling()
+        elif action_space_type == "bicycle_mpc":
+            self._step_impl = self._step_bicycle_mpc
+            self._reset_impl = self._reset_bicycle_mpc
+        elif action_space_type == "bicycle":
+            self._step_impl = self._step_bicycle_no_mpc
+            self._reset_impl = self._reset_bicycle_no_mpc
+        else:
+            raise ValueError(
+                f"Unknown action_space_type: {action_space_type}. "
+                "Must be one of: 'bicycle', 'bicycle_mpc', 'trajectory_sampling'"
             )
 
-        self._prev_action: jax.Array | np.ndarray = np.zeros(
-            (2,), dtype=np.float32
-        )  # For jerk reward
+    def _setup_trajectory_sampling(self):
+        """Setup for trajectory sampling action space"""
+        self._nr_rollouts = 10  # Number of trajectories to sample
+        self._horizon = 3  # Horizon in seconds
+        self._DT = 0.1  # Time step duration
+        # Configuration for the polynomial coefficients distribution
+        num_polys = 2
+        poly_degree = 3
+        num_coeffs_per_poly = poly_degree + 1
+        self._mean_dim = num_polys * num_coeffs_per_poly
+        self._cholesky_diag_dim = self._mean_dim
+        self._cholesky_offdiag_dim = self._mean_dim * (self._mean_dim - 1) // 2
+
+        # Set up rollout environment
+        constant_actor = agents.create_constant_speed_actor(
+            dynamics_model=self._env._state_dynamics,
+            is_controlled_func=lambda state: ~state.object_metadata.is_sdc,
+            speed=None,
+        )
+        metrics_config = _config.MetricsConfig(
+            metrics_to_run=("sdc_progression", "offroad", "overlap")
+        )
+        reward_config = _config.LinearCombinationRewardConfig(
+            rewards={"sdc_progression": 1.0, "offroad": -1.0, "overlap": -2.0},
+        )
+        env_config = dataclasses.replace(
+            _config.EnvironmentConfig(),
+            metrics=metrics_config,
+            rewards=reward_config,
+            compute_reward=True,
+        )
+        self._rollout_env = WaymaxEnv(
+            dynamics_model=dynamics.InvertibleBicycleModel(normalize_actions=True),
+            config=env_config,
+            sim_agent_actors=[constant_actor],
+            sim_agent_params=[{}],
+        )
+        self._replan_interval = 1.0  # seconds
 
     @override
     def reset(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
-        """Reset the environment
+        return self._reset_impl()
 
-        :return: Observation, info
-        :rtype: np.ndarray or jax.Array and any other info
-        """
+    def _reset_bicycle_no_mpc(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
+        """Reset implementation for bicycle action space without MPC"""
         scenario = next(self._scenario_loader)
         self._current_state, observation = merged_reset(self._env, scenario)
         observation = np.array(observation).reshape(1, -1)
 
-        if self._action_space_type == "trajectory_sampling":
-            self._current_action_sequence = jnp.zeros(
-                (int(round(self._horizon / self._DT)), 2), dtype=jnp.float32
-            )
+        return observation, {}
 
-        if self._MPC:
-            self._MPC_action = get_MPC_action(self._current_state)
-            mpc_action_array = np.array(self._MPC_action).reshape(1, 2)
-            observation = np.concatenate([observation, mpc_action_array], axis=1)
+    def _reset_bicycle_mpc(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
+        """Reset implementation for bicycle action space with MPC"""
+        scenario = next(self._scenario_loader)
+        self._current_state, observation = merged_reset(self._env, scenario)
+        observation = np.array(observation).reshape(1, -1)
+
+        # Get MPC action and append to observation
+        self._MPC_action = get_MPC_action(self._current_state)
+        mpc_action_array = np.array(self._MPC_action).reshape(1, 2)
+        observation = np.concatenate([observation, mpc_action_array], axis=1)
+
+        return observation, {}
+
+    def _reset_trajectory_sampling(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
+        """Reset implementation for trajectory sampling action space"""
+        scenario = next(self._scenario_loader)
+        self._current_state, observation = merged_reset(self._env, scenario)
+        observation = np.array(observation).reshape(1, -1)
+
+        self._current_action_plan = jnp.zeros(
+            (int(round(self._horizon / self._DT)), 2), dtype=jnp.float32
+        )
 
         return observation, {}
 
@@ -149,93 +233,146 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         Union[np.ndarray, jax.Array],
         Any,
     ]:
-        """Perform a step in the environment
-
-        :param actions: The actions to perform
-        :type actions: np.ndarray or jax.Array
-
-        :return: Observation, reward, terminated, truncated, info
-        :rtype: tuple of np.ndarray or jax.Array and any other info
-        """
-        # Check for NaN values in actions
-        if jnp.isnan(actions).any():
-            raise ValueError("Actions contain NaN values. Halting execution.")
-
+        """Perform a step in the environment"""
         actions = actions.flatten()
+        return self._step_impl(actions)
 
-        if self._action_space_type == "trajectory_sampling":
-            # Extract the mean and Cholesky parameters from the action vector
-            means = jnp.array(actions[: self._mean_dim])
-            cholesky_diag = jnp.array(
-                actions[self._mean_dim : self._mean_dim + self._cholesky_diag_dim]
-            )
-            cholesky_offdiag = jnp.array(
-                actions[
-                    self._mean_dim
-                    + self._cholesky_diag_dim : self._mean_dim
-                    + self._cholesky_diag_dim
-                    + self._cholesky_offdiag_dim
-                ]
-            )
-
-            # Get the best action from the Gaussian polynomial distribution
-            self._random_key, subkey = jax.random.split(self._random_key)
-            action_sequence = jitted_get_best_action(
-                means,
-                cholesky_diag,
-                cholesky_offdiag,
-                self._current_state,
-                self._current_action_sequence,
-                self._rollout_env,
-                self._nr_rollouts,
-                self._horizon,
-                subkey,
-            )
-            accel = action_sequence[0][0]
-            steering = action_sequence[0][1]
-
-            # Shift the action sequence for the next step (receding horizon)
-            # Take the sequence from the second element onwards
-            shifted_sequence = action_sequence[1:]
-            # Create a zero action with the same shape and dtype as one action step
-            zero_action = jnp.zeros(
-                (1, action_sequence.shape[1]), dtype=action_sequence.dtype
-            )
-            # Update the stored sequence by appending the zero action
-            self._current_action_sequence = jnp.concatenate(
-                [shifted_sequence, zero_action], axis=0
-            )
-
-        elif self._action_space_type == "bicycle":
-            accel, steering = actions
-
-        else:
-            raise ValueError(f"Unknown action_space_type: {self._action_space_type}")
-
-        if self._MPC:
-            mpc_accel, mpc_steering = self._MPC_action
-            accel = accel + mpc_accel
-            steering = steering + mpc_steering
+    def _step_bicycle_no_mpc(self, actions: Union[np.ndarray, jax.Array]) -> Tuple[
+        Union[np.ndarray, jax.Array],
+        Union[np.ndarray, jax.Array],
+        Union[np.ndarray, jax.Array],
+        Union[np.ndarray, jax.Array],
+        Any,
+    ]:
+        """Step implementation for bicycle action space without MPC"""
+        accel, steering = actions
 
         # Reshape for the environment step
         action_array = jnp.array([accel, steering], dtype=np.float32)
-        self._current_state, observation, reward, terminated, truncated = merged_step(
-            self._env, self._current_state, action_array  # type: ignore
-        )
+        (
+            self._current_state,
+            observation,
+            reward,
+            terminated,
+            truncated,
+            metrics,
+        ) = merged_step(self._env, self._current_state, action_array)
+        reward += jitted_jerk_reward(action_array, self._prev_action)
 
         observation = np.array(observation).reshape(1, -1)
         reward = np.array(reward).reshape(1, -1)
         terminated = np.array(terminated).reshape(1, -1)
         truncated = np.array(truncated).reshape(1, -1)
 
-        reward += jerk_reward(action_array, self._prev_action)
         self._prev_action = action_array  # Update previous action
         self._current_reward: float = reward[0, 0]
 
-        if self._MPC:
-            self._MPC_action = get_MPC_action(self._current_state)
-            mpc_action_array = np.array(self._MPC_action).reshape(1, 2)
-            observation = np.concatenate([observation, mpc_action_array], axis=1)
+        return observation, reward, terminated, truncated, {}
+
+    def _step_bicycle_mpc(self, actions: Union[np.ndarray, jax.Array]) -> Tuple[
+        Union[np.ndarray, jax.Array],
+        Union[np.ndarray, jax.Array],
+        Union[np.ndarray, jax.Array],
+        Union[np.ndarray, jax.Array],
+        Any,
+    ]:
+        """Step implementation for bicycle action space with MPC"""
+        accel, steering = actions
+        mpc_accel, mpc_steering = self._MPC_action
+        accel = accel + mpc_accel
+        steering = steering + mpc_steering
+
+        # Reshape for the environment step
+        action_array = jnp.array([accel, steering], dtype=np.float32)
+        (
+            self._current_state,
+            observation,
+            reward,
+            terminated,
+            truncated,
+            metrics,
+        ) = merged_step(self._env, self._current_state, action_array)
+        reward += jitted_jerk_reward(action_array, self._prev_action)
+
+        observation = np.array(observation).reshape(1, -1)
+        reward = np.array(reward).reshape(1, -1)
+        terminated = np.array(terminated).reshape(1, -1)
+        truncated = np.array(truncated).reshape(1, -1)
+
+        # Get MPC action for next step and append to observation
+        self._MPC_action = get_MPC_action(self._current_state)
+        mpc_action_array = np.array(self._MPC_action).reshape(1, 2)
+        observation = np.concatenate([observation, mpc_action_array], axis=1)
+
+        self._prev_action = action_array
+        self._current_reward: float = reward[0, 0]
+
+        return observation, reward, terminated, truncated, {}
+
+    def _step_trajectory_sampling(self, actions: Union[np.ndarray, jax.Array]) -> Tuple[
+        Union[np.ndarray, jax.Array],
+        Union[np.ndarray, jax.Array],
+        Union[np.ndarray, jax.Array],
+        Union[np.ndarray, jax.Array],
+        Any,
+    ]:
+        """Step implementation for trajectory sampling action space"""
+        # Extract the mean and Cholesky parameters from the action vector
+        means = jnp.array(actions[: self._mean_dim])
+        cholesky_diag = jnp.array(
+            actions[self._mean_dim : self._mean_dim + self._cholesky_diag_dim]
+        )
+        cholesky_offdiag = jnp.array(
+            actions[
+                self._mean_dim
+                + self._cholesky_diag_dim : self._mean_dim
+                + self._cholesky_diag_dim
+                + self._cholesky_offdiag_dim
+            ]
+        )
+
+        # Get the best action sequence from the Gaussian polynomial distribution
+        self._random_key, subkey = jax.random.split(self._random_key)
+        action_sequence = jitted_get_best_action(
+            means,
+            cholesky_diag,
+            cholesky_offdiag,
+            self._current_state,
+            self._current_action_plan,
+            self._rollout_env,
+            self._nr_rollouts,
+            self._horizon,
+            subkey,
+        )
+
+        multistep = int(round(self._replan_interval / self._DT))
+
+        # Perform a multi-step rollout with the action sequence
+        self._current_state, observation, reward, terminated, truncated = (
+            merged_multistep(
+                self._env,
+                self._current_state,
+                action_sequence,
+                multistep,
+            )
+        )
+        observation = np.array(observation).reshape(1, -1)
+        reward = np.array(reward).reshape(1, -1)
+        terminated = np.array(terminated).reshape(1, -1)
+        truncated = np.array(truncated).reshape(1, -1)
+        self._current_reward = reward[0, 0]
+
+        # Shift the action sequence for the next step (receding horizon)
+        # Take the sequence from the second element onwards
+        shifted_sequence = action_sequence[multistep:]
+        # Create a zero action with the same shape and dtype as one action step
+        zero_action = jnp.zeros(
+            (multistep, action_sequence.shape[1]), dtype=action_sequence.dtype
+        )
+        # Update the stored sequence by appending the zero action
+        self._current_action_plan = jnp.concatenate(
+            [shifted_sequence, zero_action], axis=0
+        )
 
         return observation, reward, terminated, truncated, {}
 
@@ -250,7 +387,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         # Store the current action sequence for visualization if needed
         if self._action_space_type == "trajectory_sampling":
             self._action_sequences = getattr(self, "_action_sequences", [])
-            self._action_sequences.append(self._current_action_sequence.copy())
+            self._action_sequences.append(self._current_action_plan.copy())
 
     @override
     def close(self) -> None:
@@ -397,10 +534,9 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         """The observation specs of this environment, without batch dimension."""
         observation_spec: specs.BoundedArray = self._env.observation_spec()
 
-        if self._MPC:
+        if self._action_space_type == "bicycle_mpc":
             # Add MPC action to the observation space
             # Assuming the MPC action is a 2D vector (acceleration, steering)
-            # and the original observation space is 3D
             observation_spec = specs.BoundedArray(
                 shape=(observation_spec.shape[0] + 2,),
                 minimum=np.concatenate(
@@ -422,7 +558,6 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
     @property
     def action_space(self) -> gymnasium.Space:
         """Action space"""
-
         if self._action_space_type == "trajectory_sampling":
             # Total dimension of the action space vector
             total_dim = (
@@ -460,10 +595,10 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
                 shape=(total_dim,),
                 dtype=np.float32,
             )
-        elif self._action_space_type == "bicycle":
+        elif self._action_space_type in ["bicycle", "bicycle_mpc"]:
             # Original simple action space (e.g., acceleration, steering)
             action_spec: specs.BoundedArray = self._env.action_spec().data  # type: ignore
-            if self._MPC:
+            if self._action_space_type == "bicycle_mpc":
                 action_spec = specs.BoundedArray(
                     shape=(action_spec.shape[0],),
                     minimum=np.array([-2.0, -2.0]),
