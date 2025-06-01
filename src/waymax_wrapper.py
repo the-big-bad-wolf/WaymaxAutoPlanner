@@ -3,7 +3,7 @@ import dataclasses
 import glob
 import os
 import time
-from typing import Any, Iterator, List, Tuple, Union, override
+from typing import Any, Iterator, Tuple, Union, override
 
 import cv2
 import gymnasium
@@ -23,7 +23,7 @@ from waymax import env as _env
 from waymax import visualization
 
 from mpc import get_MPC_action
-from sampler import get_best_action, jitted_get_best_action
+from sampler import jitted_get_best_action
 from waymax_modified import WaymaxEnv
 
 
@@ -100,6 +100,7 @@ def merged_reset(
 merged_reset = jit(merged_reset, static_argnums=(0,))
 
 
+@jit
 def jerk_reward(actions: jax.Array, prev_actions: jax.Array) -> jax.Array:
     """Calculate jerk reward based on the difference between the current and previous actions."""
     accel_jerk = jnp.abs(actions[0] - prev_actions[0]) / 2
@@ -107,7 +108,46 @@ def jerk_reward(actions: jax.Array, prev_actions: jax.Array) -> jax.Array:
     return -0.1 * accel_jerk - 0.5 * steering_jerk
 
 
-jitted_jerk_reward = jit(jerk_reward)
+@jit
+def _update_episode_metrics(
+    current_had_overlap: jnp.ndarray,
+    current_had_offroad: jnp.ndarray,
+    overlap_detected: jnp.ndarray,
+    offroad_detected: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Update episode metrics in a JIT-compatible way"""
+    # Use maximum to avoid conditionals - if either is 1, result is 1
+    new_had_overlap = jnp.maximum(current_had_overlap, overlap_detected)
+    new_had_offroad = jnp.maximum(current_had_offroad, offroad_detected)
+    return new_had_overlap, new_had_offroad
+
+
+@jit
+def _detect_events_from_metrics(metrics):
+    """Detect overlap and offroad events from metrics in a JIT-compatible way"""
+    # Extract the relevant metrics and convert to binary flags
+    overlap_detected = jnp.any(metrics["overlap"].value > 0).astype(jnp.int32)
+    offroad_detected = jnp.any(metrics["offroad"].value > 0).astype(jnp.int32)
+    progression = metrics["sdc_progression"].value
+    return overlap_detected, offroad_detected, progression
+
+
+@jit
+def _update_episode_counters(
+    episode_total: jnp.ndarray,
+    episodes_with_overlap: jnp.ndarray,
+    episodes_with_offroad: jnp.ndarray,
+    total_progression: jnp.ndarray,
+    had_overlap: jnp.ndarray,
+    had_offroad: jnp.ndarray,
+    episode_progression: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Update episode counters when an episode ends"""
+    new_total = episode_total + 1
+    new_overlap = episodes_with_overlap + had_overlap
+    new_offroad = episodes_with_offroad + had_offroad
+    new_total_progression = total_progression + episode_progression
+    return new_total, new_overlap, new_offroad, new_total_progression
 
 
 class WaymaxWrapper(skrl_wrappers.Wrapper):
@@ -148,6 +188,24 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
                 f"Unknown action_space_type: {action_space_type}. "
                 "Must be one of: 'bicycle', 'bicycle_mpc', 'trajectory_sampling'"
             )
+
+        self._setup_metrics_tracking()
+
+    def _setup_metrics_tracking(self):
+        """Set up metrics tracking for episodes"""
+        # Initialize episode counters as JAX arrays
+        self._episodes_total = jnp.array(-1, dtype=jnp.int32)
+        self._episodes_with_overlap = jnp.array(0, dtype=jnp.int32)
+        self._episodes_with_offroad = jnp.array(0, dtype=jnp.int32)
+        self._total_progression = jnp.array(
+            0.0, dtype=jnp.float32
+        )  # Total progression across all episodes
+        # Current episode tracking flags
+        self._current_episode_had_overlap = jnp.array(0, dtype=jnp.int32)
+        self._current_episode_had_offroad = jnp.array(0, dtype=jnp.int32)
+        self._current_episode_progression = jnp.array(
+            0.0, dtype=jnp.float32
+        )  # Current episode's progression
 
     def _setup_trajectory_sampling(self):
         """Setup for trajectory sampling action space"""
@@ -190,6 +248,32 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
 
     @override
     def reset(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
+        (
+            self._episodes_total,
+            self._episodes_with_overlap,
+            self._episodes_with_offroad,
+            self._total_progression,
+        ) = _update_episode_counters(
+            self._episodes_total,
+            self._episodes_with_overlap,
+            self._episodes_with_offroad,
+            self._total_progression,
+            self._current_episode_had_overlap,
+            self._current_episode_had_offroad,
+            self._current_episode_progression,
+        )
+
+        # Reset episode tracking flags
+        self._current_episode_had_overlap = jnp.zeros_like(
+            self._current_episode_had_overlap
+        )
+        self._current_episode_had_offroad = jnp.zeros_like(
+            self._current_episode_had_offroad
+        )
+        self._current_episode_progression = jnp.zeros_like(
+            self._current_episode_progression
+        )
+
         return self._reset_impl()
 
     def _reset_bicycle_no_mpc(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
@@ -257,14 +341,31 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             truncated,
             metrics,
         ) = merged_step(self._env, self._current_state, action_array)
-        reward += jitted_jerk_reward(action_array, self._prev_action)
+        reward += jerk_reward(action_array, self._prev_action)
 
         observation = np.array(observation).reshape(1, -1)
         reward = np.array(reward).reshape(1, -1)
         terminated = np.array(terminated).reshape(1, -1)
         truncated = np.array(truncated).reshape(1, -1)
 
-        self._prev_action = action_array  # Update previous action
+        # Detect events from metrics
+        overlap_detected, offroad_detected, progression = _detect_events_from_metrics(
+            metrics
+        )
+
+        # Update episode tracking flags
+        self._current_episode_had_overlap, self._current_episode_had_offroad = (
+            _update_episode_metrics(
+                self._current_episode_had_overlap,
+                self._current_episode_had_offroad,
+                overlap_detected,
+                offroad_detected,
+            )
+        )
+
+        self._current_episode_progression = progression
+
+        self._prev_action = action_array
         self._current_reward: float = reward[0, 0]
 
         return observation, reward, terminated, truncated, {}
@@ -292,7 +393,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             truncated,
             metrics,
         ) = merged_step(self._env, self._current_state, action_array)
-        reward += jitted_jerk_reward(action_array, self._prev_action)
+        reward += jerk_reward(action_array, self._prev_action)
 
         observation = np.array(observation).reshape(1, -1)
         reward = np.array(reward).reshape(1, -1)
@@ -392,11 +493,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
     @override
     def close(self) -> None:
         """Close the environment"""
-        if not self._states:
-            return
-
         # Find the newest folder in runs/
-
         runs_dir = "runs/"
         os.makedirs(runs_dir, exist_ok=True)
         run_folders = glob.glob(os.path.join(runs_dir, "*"))
@@ -405,6 +502,27 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             os.makedirs(newest_folder, exist_ok=True)
         else:
             newest_folder = max(run_folders, key=os.path.getctime)
+
+        # Write episode statistics to a file
+        stats = self.get_episode_statistics()
+        stats_path = os.path.join(newest_folder, "episode_statistics.txt")
+        with open(stats_path, "w") as f:
+            f.write("Waymax Episode Statistics\n")
+            f.write("=======================\n\n")
+            f.write(f"Total Episodes: {stats['total_episodes']}\n")
+            f.write(
+                f"Episodes with Overlap: {stats['episodes_with_overlap']} ({stats['overlap_percentage']:.2f}%)\n"
+            )
+            f.write(
+                f"Episodes with Offroad: {stats['episodes_with_offroad']} ({stats['offroad_percentage']:.2f}%)\n"
+            )
+            f.write(f"Average Progression: {stats['average_progression']:.2f}%\n")
+
+        print(f"Episode statistics saved to '{stats_path}'")
+
+        # Continue with existing video creation code
+        if not hasattr(self, "_states") or not self._states:
+            return
 
         # Create video paths
         waymax_video_path = os.path.join(newest_folder, "waymax.mp4")
@@ -613,3 +731,26 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             )
         else:
             raise ValueError(f"Unknown action_space_type: {self._action_space_type}")
+
+    def get_episode_statistics(self):
+        """Returns the current episode statistics using JAX arrays"""
+        episodes_total = np.array(self._episodes_total)
+        episodes_with_overlap = np.array(self._episodes_with_overlap)
+        episodes_with_offroad = np.array(self._episodes_with_offroad)
+        total_progression = np.array(self._total_progression)
+
+        # Avoid division by zero
+        safe_denom = np.maximum(1, episodes_total)
+
+        overlap_percentage = (episodes_with_overlap / safe_denom) * 100.0
+        offroad_percentage = (episodes_with_offroad / safe_denom) * 100.0
+        average_progression = (total_progression / safe_denom) * 100
+
+        return {
+            "total_episodes": episodes_total,
+            "episodes_with_overlap": episodes_with_overlap,
+            "episodes_with_offroad": episodes_with_offroad,
+            "overlap_percentage": overlap_percentage,
+            "offroad_percentage": offroad_percentage,
+            "average_progression": average_progression,
+        }

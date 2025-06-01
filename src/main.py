@@ -68,10 +68,10 @@ if __name__ == "__main__":
     # Set the backend to "jax" or "numpy"
     config.jax.backend = "numpy"
 
-    # training_path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
-    training_path = "data/training_tfexample.tfrecord@5"
+    training_path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
+    # training_path = "data/training_tfexample.tfrecord@5"
     env, scenario_loader = setup_waymax(training_path)
-    env = WaymaxWrapper(env, scenario_loader, action_space_type="trajectory_sampling")
+    env = WaymaxWrapper(env, scenario_loader, action_space_type="bicycle")
 
     # instantiate a memory as rollout buffer
     mem_size = 16384
