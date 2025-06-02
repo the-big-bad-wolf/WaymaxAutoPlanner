@@ -358,7 +358,9 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             observation.is_ego,
             keepdims=True,
         )
-        sdc_velocity_xy = sdc_trajectory.vel_xy
+        sdc_velocity_xy = sdc_trajectory.vel_xy[..., 0, 0, :]
+        sdc_length = sdc_trajectory.length[..., 0, 0]
+        sdc_width = sdc_trajectory.width[..., 0, 0]
 
         # Create the goal position from the last point in the logged trajectory
         sdc_xy_goal = datatypes.select_by_onehot(
@@ -372,11 +374,6 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             sdc_xy_goal[..., 0] ** 2 + sdc_xy_goal[..., 1] ** 2
         )
         sdc_goal_angle = jnp.arctan2(sdc_xy_goal[..., 1], sdc_xy_goal[..., 0])
-        sdc_yaw_goal = datatypes.select_by_onehot(
-            state.log_trajectory.yaw[..., -1],
-            state.object_metadata.is_sdc,
-            keepdims=True,
-        )
 
         sdc_offroad = is_offroad(sdc_trajectory, observation.roadgraph_static_points)
         sdc_offroad = sdc_offroad.astype(jnp.float32)  # Convert boolean to float32
@@ -412,6 +409,8 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
                 sdc_goal_distance.flatten(),
                 sdc_velocity_xy.flatten(),
                 sdc_offroad.flatten(),
+                sdc_length.flatten(),
+                sdc_width.flatten(),
             ],
             axis=-1,
         )
@@ -431,6 +430,8 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         sdc_goal_distance_dim = 1
         sdc_vel_dim = 2  # (vx, vy)
         sdc_offroad_dim = 1
+        sdc_length_dim = 1
+        sdc_width_dim = 1
 
         # Total shape is the sum of all component dimensions
         total_dim = (
@@ -441,6 +442,8 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             + sdc_goal_distance_dim
             + sdc_vel_dim
             + sdc_offroad_dim
+            + sdc_length_dim
+            + sdc_width_dim
         )
 
         # Define bounds for each component
@@ -467,6 +470,12 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         sdc_offroad_min = [0.0]
         sdc_offroad_max = [1.0]
 
+        # Add bounds for vehicle dimensions based on Waymo Jaguar I-Pace (in meters)
+        sdc_length_min = [0.0]
+        sdc_length_max = [4.863]
+        sdc_width_min = [0.0]
+        sdc_width_max = [2.13]
+
         # Combine all bounds in the order of concatenation in the observe method
         min_bounds = jnp.array(
             circogram_min
@@ -476,7 +485,9 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             + sdc_goal_distance_min
             + sdc_vel_x_min
             + sdc_vel_y_min
-            + sdc_offroad_min,
+            + sdc_offroad_min
+            + sdc_length_min
+            + sdc_width_min,
             dtype=jnp.float32,
         )
         max_bounds = jnp.array(
@@ -487,7 +498,9 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             + sdc_goal_distance_max
             + sdc_vel_x_max
             + sdc_vel_y_max
-            + sdc_offroad_max,
+            + sdc_offroad_max
+            + sdc_length_max
+            + sdc_width_max,
             dtype=jnp.float32,
         )
 
