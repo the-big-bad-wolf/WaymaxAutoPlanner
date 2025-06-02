@@ -405,6 +405,23 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         mpc_action_array = np.array(self._MPC_action).reshape(1, 2)
         observation = np.concatenate([observation, mpc_action_array], axis=1)
 
+        # Detect events from metrics
+        overlap_detected, offroad_detected, progression = _detect_events_from_metrics(
+            metrics
+        )
+
+        # Update episode tracking flags
+        self._current_episode_had_overlap, self._current_episode_had_offroad = (
+            _update_episode_metrics(
+                self._current_episode_had_overlap,
+                self._current_episode_had_offroad,
+                overlap_detected,
+                offroad_detected,
+            )
+        )
+
+        self._current_episode_progression = progression
+
         self._prev_action = action_array
         self._current_reward: float = reward[0, 0]
 
@@ -727,7 +744,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
                 low=action_spec.minimum,
                 high=action_spec.maximum,
                 shape=(2,),
-                dtype=action_spec.dtype,  # type: ignore
+                dtype=action_spec.dtype  # type: ignore
             )
         else:
             raise ValueError(f"Unknown action_space_type: {self._action_space_type}")
