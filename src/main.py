@@ -1,4 +1,5 @@
 import dataclasses
+import datetime
 
 from skrl import config
 from skrl.agents.jax.ppo import PPO, PPO_DEFAULT_CONFIG
@@ -68,10 +69,12 @@ if __name__ == "__main__":
     # Set the backend to "jax" or "numpy"
     config.jax.backend = "numpy"
 
+    action_space_type = "bicycle"  # or biycle_mpc or trajectory_sampling
+
     training_path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
-    # training_path = "data/training_tfexample.tfrecord@5"
+    training_path = "data/training_tfexample.tfrecord@5"
     env, scenario_loader = setup_waymax(training_path)
-    env = WaymaxWrapper(env, scenario_loader, action_space_type="bicycle")
+    env = WaymaxWrapper(env, scenario_loader, action_space_type=action_space_type)
 
     # instantiate a memory as rollout buffer
     mem_size = 16384
@@ -96,6 +99,9 @@ if __name__ == "__main__":
     ppo_cfg["state_preprocessor_kwargs"] = {"size": env.observation_space}
     ppo_cfg["value_preprocessor"] = RunningStandardScaler
     ppo_cfg["value_preprocessor_kwargs"] = {"size": 1}
+    ppo_cfg["experiment"]["experiment_name"] = "{}_{}".format(
+        datetime.datetime.now().strftime("%y-%m-%d_%H-%M"), action_space_type
+    )
 
     ppo_agent = PPO(
         models=ppo_models,
@@ -113,9 +119,9 @@ if __name__ == "__main__":
 
     validation_path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/validation/validation_tfexample.tfrecord@150"
     env, scenario_loader = setup_waymax(validation_path, use_idm=True)
-    env = WaymaxWrapper(env, scenario_loader, action_space_type="bicycle")
+    env = WaymaxWrapper(env, scenario_loader, action_space_type=action_space_type)
     trainer.env = env
     trainer.timesteps = 500000
     # visualize the agent
     # trainer.headless = False
-    trainer.eval()
+    # trainer.eval()
