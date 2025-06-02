@@ -69,7 +69,7 @@ if __name__ == "__main__":
     # Set the backend to "jax" or "numpy"
     config.jax.backend = "numpy"
 
-    action_space_type = "bicycle"  # or biycle_mpc or trajectory_sampling
+    action_space_type = "bicycle_mpc"  # bicycle/biycle_mpc/trajectory_sampling
 
     training_path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
     training_path = "data/training_tfexample.tfrecord@5"
@@ -85,6 +85,9 @@ if __name__ == "__main__":
     ppo_models["value"] = Value_Model(env.observation_space, env.action_space)
     for role, model in ppo_models.items():
         model.init_state_dict(role)
+
+    if action_space_type == "bicycle_mpc":
+        ppo_models["policy"].init_weights(method_name="zeros")
 
     ppo_cfg = PPO_DEFAULT_CONFIG.copy()
     ppo_cfg["rollouts"] = mem_size  # memory_size
@@ -111,6 +114,8 @@ if __name__ == "__main__":
         action_space=env.action_space,
     )
 
+    # Load the pre-trained agent
+    # ppo_agent.load("runs/25-06-02_01-16-37-338753_PPO_BASELINE/checkpoints/best_agent.pickle")
     # configure and instantiate the RL trainer
     cfg_trainer = {"timesteps": 5000000, "headless": True}
     trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[ppo_agent])
@@ -121,7 +126,7 @@ if __name__ == "__main__":
     env, scenario_loader = setup_waymax(validation_path, use_idm=True)
     env = WaymaxWrapper(env, scenario_loader, action_space_type=action_space_type)
     trainer.env = env
-    trainer.timesteps = 500000
+    trainer.timesteps = 1000
     # visualize the agent
-    # trainer.headless = False
+    trainer.headless = False
     # trainer.eval()
