@@ -87,7 +87,7 @@ if __name__ == "__main__":
         model.init_state_dict(role)
 
     if action_space_type == "bicycle_mpc":
-        ppo_models["policy"].init_weights(method_name="zeros")
+        ppo_models["policy"].init_parameters(method_name="zeros")
 
     ppo_cfg = PPO_DEFAULT_CONFIG.copy()
     ppo_cfg["rollouts"] = mem_size  # memory_size
