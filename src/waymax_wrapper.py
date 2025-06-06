@@ -22,7 +22,6 @@ from waymax import datatypes, dynamics
 from waymax import env as _env
 from waymax import visualization
 
-from mpc import get_MPC_action
 from sampler import jitted_get_best_action
 from waymax_modified import WaymaxEnv
 
@@ -51,39 +50,73 @@ def merged_multistep(
     actions: jax.Array,
     num_steps: int,
 ):
-    def body_fn(
-        i: int, carry: Tuple[_env.PlanningAgentSimulatorState, jax.Array]
-    ) -> Tuple[_env.PlanningAgentSimulatorState, jax.Array]:
-        current_state, cumulative_reward = carry
+    """Performs a multi-step rollout using Waymax's native rollout functionality."""
 
-        action_data = actions[i]
-        action = datatypes.Action(
-            data=action_data.flatten(), valid=jnp.ones((1,), dtype=bool)
+    # Define simplified actor logic with less redundant operations
+    def init_fn(rng, state):
+        return {"action_index": 0}
+
+    def select_action(params, state, actor_state, rng):
+        # Get current action directly without redundant slicing/squeezing
+        action_index = actor_state["action_index"]
+        action = params["action_sequence"][action_index]
+
+        # Create action object directly without redundant array creation
+        action_obj = datatypes.Action(data=action, valid=jnp.ones(1, dtype=bool))
+
+        # Increment with a simpler expression
+        actor_state = {"action_index": jnp.minimum(action_index + 1, num_steps - 1)}
+
+        return agents.WaymaxActorOutput(
+            actor_state=actor_state,
+            action=action_obj,
+            is_controlled=state.object_metadata.is_sdc,
         )
 
-        reward_current_step = env.reward(current_state, action)
-        next_state = env.step(current_state, action)
-        cumulative_reward += reward_current_step
+    # Create actor with simplified parameters
+    sequence_actor = agents.actor_core_factory(init_fn, select_action)
+    actor_params = {"action_sequence": actions}
 
-        return next_state, cumulative_reward
-
-    # Initial carry: the starting state and zero cumulative reward
-    initial_carry = (state, jnp.array(0.0, dtype=jnp.float32))
-
-    # Loop over the number of steps
-    final_state, total_cumulative_reward = jax.lax.fori_loop(
-        0, num_steps, body_fn, initial_carry
+    # Run rollout with static key to avoid redundant key generation
+    rollout_output = _env.rollout(
+        scenario=state,
+        actor=sequence_actor,
+        env=env,
+        rng=jax.random.PRNGKey(0),  # Deterministic key because not needed
+        rollout_num_steps=num_steps,
+        actor_params=actor_params,
     )
 
-    # Get observation, termination, and truncation based on the final_state
+    # Extract final state directly
+    final_state = jax.tree_map(lambda x: x[-1], rollout_output.state)
+    metrics_history = rollout_output.metrics
+
+    # Simplify overlap/offroad detection with one jnp.any call
+    overlap_detected = jnp.any(metrics_history["overlap"].value > 0).astype(jnp.int32)
+    offroad_detected = jnp.any(metrics_history["offroad"].value > 0).astype(jnp.int32)
+
+    # Get progression data directly
+    progression_values = metrics_history["sdc_progression"].value
+    rollout_progression = progression_values[-1]
+
+    # Get reward and reshape in one operation
+    total_reward = jnp.sum(rollout_output.reward).reshape(1, -1)
+
+    # Get observation and reshape in one operation
     observation = env.observe(final_state).reshape(1, -1)
     terminated = env.termination(final_state).reshape(1, -1)
     truncated = env.truncation(final_state).reshape(1, -1)
 
-    # Reshape total_cumulative_reward to be consistent (e.g., (1, 1))
-    total_cumulative_reward = total_cumulative_reward.reshape(1, -1)
-
-    return final_state, observation, total_cumulative_reward, terminated, truncated
+    return (
+        final_state,
+        observation,
+        total_reward,
+        terminated,
+        truncated,
+        overlap_detected,
+        offroad_detected,
+        rollout_progression,
+    )
 
 
 merged_multistep = jit(merged_multistep, static_argnums=(0, 3))
@@ -178,6 +211,11 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             self._reset_impl = self._reset_trajectory_sampling
             self._setup_trajectory_sampling()
         elif action_space_type == "bicycle_mpc":
+            self._get_MPC_action = None
+            if action_space_type == "bicycle_mpc":
+                from mpc import get_MPC_action
+
+                self._get_MPC_action = get_MPC_action
             self._step_impl = self._step_bicycle_mpc
             self._reset_impl = self._reset_bicycle_mpc
         elif action_space_type == "bicycle":
@@ -291,7 +329,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         observation = np.array(observation).reshape(1, -1)
 
         # Get MPC action and append to observation
-        self._MPC_action = get_MPC_action(self._current_state)
+        self._MPC_action = self._get_MPC_action(self._current_state)  # type: ignore
         mpc_action_array = np.array(self._MPC_action).reshape(1, 2)
         observation = np.concatenate([observation, mpc_action_array], axis=1)
 
@@ -401,7 +439,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         truncated = np.array(truncated).reshape(1, -1)
 
         # Get MPC action for next step and append to observation
-        self._MPC_action = get_MPC_action(self._current_state)
+        self._MPC_action = self._get_MPC_action(self._current_state)  # type: ignore
         mpc_action_array = np.array(self._MPC_action).reshape(1, 2)
         observation = np.concatenate([observation, mpc_action_array], axis=1)
 
@@ -465,15 +503,34 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
 
         multistep = int(round(self._replan_interval / self._DT))
 
-        # Perform a multi-step rollout with the action sequence
-        self._current_state, observation, reward, terminated, truncated = (
-            merged_multistep(
-                self._env,
-                self._current_state,
-                action_sequence,
-                multistep,
-            )
+        # Perform a multi-step rollout with the action sequence and track events
+        (
+            self._current_state,
+            observation,
+            reward,
+            terminated,
+            truncated,
+            had_overlap,
+            had_offroad,
+            progression,
+        ) = merged_multistep(
+            self._env,
+            self._current_state,
+            action_sequence,
+            multistep,
         )
+
+        # Update episode tracking flags using the accumulated events from all steps
+        self._current_episode_had_overlap = jnp.maximum(
+            self._current_episode_had_overlap, had_overlap
+        )
+        self._current_episode_had_offroad = jnp.maximum(
+            self._current_episode_had_offroad, had_offroad
+        )
+
+        # Store the current progression
+        self._current_episode_progression = progression
+
         observation = np.array(observation).reshape(1, -1)
         reward = np.array(reward).reshape(1, -1)
         terminated = np.array(terminated).reshape(1, -1)
@@ -744,7 +801,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
                 low=action_spec.minimum,
                 high=action_spec.maximum,
                 shape=(2,),
-                dtype=action_spec.dtype  # type: ignore
+                dtype=action_spec.dtype,  # type: ignore
             )
         else:
             raise ValueError(f"Unknown action_space_type: {self._action_space_type}")
