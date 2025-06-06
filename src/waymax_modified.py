@@ -470,11 +470,11 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         sdc_offroad_min = [0.0]
         sdc_offroad_max = [1.0]
 
-        # Add bounds for vehicle dimensions based on Waymo Jaguar I-Pace (in meters)
+        # Add bounds for vehicle dimensions
         sdc_length_min = [0.0]
-        sdc_length_max = [4.863]
+        sdc_length_max = [5.2860003]
         sdc_width_min = [0.0]
-        sdc_width_max = [2.13]
+        sdc_width_max = [2.332]
 
         # Combine all bounds in the order of concatenation in the observe method
         min_bounds = jnp.array(
