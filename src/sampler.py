@@ -96,32 +96,29 @@ def _rollout_action_sequences(
 ) -> _env.RolloutOutput:
     """Rolls out action sequences in the environment and returns outputs and metrics."""
 
-    # Define actor logic
-    init = lambda rng, state: {"action_index": 0}
+    # Define simpler actor logic
+    def init_fn(rng, state):
+        return {"action_index": 0}
 
-    def select_action(
-        params: Any, state: datatypes.SimulatorState, actor_state: Any, rng: jax.Array
-    ):
+    def select_action(params, state, actor_state, rng):
+        # Get current action directly
         action_index = actor_state["action_index"]
-        action_sequence = params["action_sequence"]
-        current_action = jax.lax.dynamic_slice_in_dim(
-            action_sequence, action_index, 1, axis=0
-        )
-        action = jnp.squeeze(current_action, axis=0)
-        action_obj = datatypes.Action(
-            data=jnp.array([action[0], action[1]]), valid=jnp.array([True])
-        )
-        actor_state["action_index"] += 1
+        action = params["action_sequence"][action_index]
+
+        action_obj = datatypes.Action(data=action, valid=jnp.ones(1, dtype=bool))
+
+        # Update state immutably
+        new_actor_state = {"action_index": jnp.minimum(action_index + 1, num_steps - 1)}
+
         return agents.WaymaxActorOutput(
-            actor_state=actor_state,  # type: ignore
-            action=action_obj,  # type: ignore
-            is_controlled=state.object_metadata.is_sdc,  # type: ignore
+            actor_state=new_actor_state,
+            action=action_obj,
+            is_controlled=state.object_metadata.is_sdc,
         )
 
-    sequence_actor = agents.actor_core_factory(init, select_action)
+    sequence_actor = agents.actor_core_factory(init_fn, select_action)
     batched_actor_params = {"action_sequence": action_sequences}
 
-    # Define and vmap the rollout function
     def single_rollout(rng_key, actor_params_single):
         return _env.rollout(
             scenario=initial_state,
@@ -132,10 +129,9 @@ def _rollout_action_sequences(
             actor_params=actor_params_single,
         )
 
+    # Vectorize the rollout function for all action sequences
     vmapped_rollout = jax.vmap(single_rollout, in_axes=(0, 0))
-    rollout_outputs = vmapped_rollout(rollout_keys, batched_actor_params)
-
-    return rollout_outputs
+    return vmapped_rollout(rollout_keys, batched_actor_params)
 
 
 def get_best_action(
