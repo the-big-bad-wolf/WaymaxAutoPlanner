@@ -358,7 +358,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             observation.is_ego,
             keepdims=True,
         )
-        sdc_velocity_xy = sdc_trajectory.vel_xy[..., 0, 0, :]
+        sdc_velocity = sdc_trajectory.vel_x[..., 0, 0]
         sdc_length = sdc_trajectory.length[..., 0, 0]
         sdc_width = sdc_trajectory.width[..., 0, 0]
 
@@ -407,7 +407,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
                 total_tangential_speed.flatten(),
                 sdc_goal_angle.flatten(),
                 sdc_goal_distance.flatten(),
-                sdc_velocity_xy.flatten(),
+                sdc_velocity.flatten(),
                 sdc_offroad.flatten(),
                 sdc_length.flatten(),
                 sdc_width.flatten(),
@@ -428,7 +428,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         tangential_speed_dim = NUM_RAYS
         sdc_goal_angle_dim = 1
         sdc_goal_distance_dim = 1
-        sdc_vel_dim = 2  # (vx, vy)
+        sdc_velocity_dim = 1
         sdc_offroad_dim = 1
         sdc_length_dim = 1
         sdc_width_dim = 1
@@ -440,7 +440,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             + tangential_speed_dim
             + sdc_goal_angle_dim
             + sdc_goal_distance_dim
-            + sdc_vel_dim
+            + sdc_velocity_dim
             + sdc_offroad_dim
             + sdc_length_dim
             + sdc_width_dim
@@ -462,18 +462,16 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
         sdc_goal_distance_max = [250.0]  # Max distance observed
 
         # SDC velocity bounds
-        sdc_vel_x_min = [-30.0]
-        sdc_vel_x_max = [30.0]
-        sdc_vel_y_min = [-9.0]  # Estimated max tangential speed is 9 m/s
-        sdc_vel_y_max = [9.0]
+        sdc_velocity_min = [-30.0]
+        sdc_velocity_max = [30.0]  # Assuming max absolute speed of 30 m/s
 
         sdc_offroad_min = [0.0]
         sdc_offroad_max = [1.0]
 
         # Add bounds for vehicle dimensions
-        sdc_length_min = [0.0]
+        sdc_length_min = [1.0]
         sdc_length_max = [5.2860003]
-        sdc_width_min = [0.0]
+        sdc_width_min = [1.0]
         sdc_width_max = [2.332]
 
         # Combine all bounds in the order of concatenation in the observe method
@@ -483,8 +481,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             + tangential_speed_min
             + sdc_goal_angle_min
             + sdc_goal_distance_min
-            + sdc_vel_x_min
-            + sdc_vel_y_min
+            + sdc_velocity_min
             + sdc_offroad_min
             + sdc_length_min
             + sdc_width_min,
@@ -496,8 +493,7 @@ class WaymaxEnv(_env.PlanningAgentEnvironment):
             + tangential_speed_max
             + sdc_goal_angle_max
             + sdc_goal_distance_max
-            + sdc_vel_x_max
-            + sdc_vel_y_max
+            + sdc_velocity_max
             + sdc_offroad_max
             + sdc_length_max
             + sdc_width_max,
