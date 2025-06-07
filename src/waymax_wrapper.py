@@ -265,10 +265,10 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             speed=None,
         )
         metrics_config = _config.MetricsConfig(
-            metrics_to_run=("sdc_progression", "offroad", "overlap")
+            metrics_to_run=("sdc_progression", "overlap")
         )
         reward_config = _config.LinearCombinationRewardConfig(
-            rewards={"sdc_progression": 1.0, "offroad": -1.0, "overlap": -2.0},
+            rewards={"sdc_progression": 1.0, "overlap": -2.0},
         )
         env_config = dataclasses.replace(
             _config.EnvironmentConfig(),
@@ -282,7 +282,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             sim_agent_actors=[constant_actor],
             sim_agent_params=[{}],
         )
-        self._replan_interval = 1.0  # seconds
+        self._replan_interval = 0.1  # seconds
 
     @override
     def reset(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
@@ -567,19 +567,32 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
     @override
     def close(self) -> None:
         """Close the environment"""
-        # Find the newest folder in runs/
+        # Determine the correct directory for saving files
         runs_dir = "runs/"
         os.makedirs(runs_dir, exist_ok=True)
+
+        # Check if we're in evaluation mode by looking for eval_logs in recent directories
         run_folders = glob.glob(os.path.join(runs_dir, "*"))
-        if not run_folders:
-            newest_folder = os.path.join(runs_dir, "default")
-            os.makedirs(newest_folder, exist_ok=True)
+        eval_folders = glob.glob(os.path.join(runs_dir, "*/eval_logs"))
+
+        if eval_folders:
+            # Use the most recent eval_logs folder
+            newest_eval_folder = max(eval_folders, key=os.path.getctime)
+            save_directory = newest_eval_folder
+            print(f"Saving to evaluation directory: {save_directory}")
         else:
-            newest_folder = max(run_folders, key=os.path.getctime)
+            # Fall back to the newest run folder
+            if not run_folders:
+                newest_folder = os.path.join(runs_dir, "default")
+                os.makedirs(newest_folder, exist_ok=True)
+            else:
+                newest_folder = max(run_folders, key=os.path.getctime)
+            save_directory = newest_folder
+            print(f"Saving to training directory: {save_directory}")
 
         # Write episode statistics to a file
         stats = self.get_episode_statistics()
-        stats_path = os.path.join(newest_folder, "episode_statistics.txt")
+        stats_path = os.path.join(save_directory, "episode_statistics.txt")
         with open(stats_path, "w") as f:
             f.write("Waymax Episode Statistics\n")
             f.write("=======================\n\n")
@@ -598,9 +611,9 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         if not hasattr(self, "_states") or not self._states:
             return
 
-        # Create video paths
-        waymax_video_path = os.path.join(newest_folder, "waymax.mp4")
-        action_seq_video_path = os.path.join(newest_folder, "action_sequences.mp4")
+        # Create video paths in the same directory
+        waymax_video_path = os.path.join(save_directory, "waymax.mp4")
+        action_seq_video_path = os.path.join(save_directory, "action_sequences.mp4")
 
         imgs = []
         jit_observe = jit(datatypes.sdc_observation_from_state)
