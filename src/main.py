@@ -1,12 +1,39 @@
 import dataclasses
 import datetime
+import math
+from typing import Sequence
 
 from skrl import config
 from skrl.agents.jax.ppo import PPO, PPO_DEFAULT_CONFIG
 from skrl.memories.jax import RandomMemory
-from skrl.resources.schedulers.jax import KLAdaptiveRL
 from skrl.resources.preprocessors.jax import RunningStandardScaler
+from skrl.resources.schedulers.jax import KLAdaptiveRL
 from skrl.trainers.jax import SequentialTrainer
+
+
+def generate_sharded_filenames_with_range(path: str) -> Sequence[str]:
+    """Enhanced version that supports @start-end format"""
+    base_name, shard_spec = path.split("@")
+
+    if "-" in shard_spec:
+        start_shard, end_shard = map(int, shard_spec.split("-"))
+        total_shards = 1000  # Waymo training dataset total
+        shard_range = range(start_shard, end_shard + 1)
+    else:
+        total_shards = int(shard_spec)
+        shard_range = range(total_shards)
+
+    shard_width = max(5, int(math.log10(total_shards) + 1))
+    format_str = base_name + "-%0" + str(shard_width) + "d-of-%05d"
+    return [format_str % (i, total_shards) for i in shard_range]
+
+
+# Monkey patch the function
+from waymax.dataloader import dataloader_utils
+
+dataloader_utils.generate_sharded_filenames = generate_sharded_filenames_with_range
+
+
 from waymax import agents
 from waymax import config as _config
 from waymax import dataloader, dynamics
@@ -19,28 +46,48 @@ from waymax_wrapper import WaymaxWrapper
 # CONFIGURATION - Edit these variables to change behavior
 #####################################################################
 # Run mode
-MODE = "train"  # "train" or "eval"
+MODE = "eval"  # "train" or "eval"
 
 # Agent configuration
 ACTION_SPACE_TYPE = "bicycle"  # bicycle/bicycle_mpc/trajectory_sampling
-MODEL_PATH = "runs/25-06-04_01-24_bicycle/checkpoints/best_agent.pickle"
+MODEL_PATH = "runs/25-06-07_03-00_bicycle/checkpoints/best_agent.pickle"
 
 # Training and evaluation parameters
 TRAIN_TIMESTEPS = 3000000
 EVAL_TIMESTEPS = 1000
-HEADLESS = True  # Set to False to enable visualization
+HEADLESS = False  # Set to False to enable visualization
+
+# Dataset configuration
+TRAIN_SHARD_START = 0
+TRAIN_SHARD_COUNT = 850  # Use first 850 shards for training
+EVAL_SHARD_START = 850  # Use remaining shards for evaluation
+EVAL_SHARD_COUNT = 150  # Use last 150 shards for evaluation
 #####################################################################
 
 
-def setup_waymax(data_path: str, use_idm: bool = False):
-    # Existing setup_waymax code unchanged
+def setup_waymax(
+    data_path: str, use_idm: bool = False, shard_start: int = 0, shard_count: int = 1000
+):
     max_num_objects = 128
+
+    # Create shard-specific path with correct format
+    if "@" in data_path:
+        base_path = data_path.split("@")[0]
+        # Use the correct format: @start-end
+        shard_end = shard_start + shard_count - 1
+        shard_path = f"{base_path}@{shard_start}-{shard_end}"
+    else:
+        shard_end = shard_start + shard_count - 1
+        shard_path = f"{data_path}@{shard_start}-{shard_end}"
+
     data_loader_config = dataclasses.replace(
         _config.WOD_1_1_0_TRAINING,
-        path=data_path,
+        path=shard_path,
         max_num_objects=max_num_objects,
         max_num_rg_points=30000,
     )
+
+    print(f"Loading data from: {shard_path}")
     scenario_loader = dataloader.simulator_state_generator(config=data_loader_config)
 
     # Set up sim agents based on the use_idm parameter
@@ -63,7 +110,7 @@ def setup_waymax(data_path: str, use_idm: bool = False):
         metrics_to_run=("sdc_progression", "offroad", "overlap")
     )
     reward_config = _config.LinearCombinationRewardConfig(
-        rewards={"sdc_progression": 1.0, "offroad": -1.0, "overlap": -2.0},
+        rewards={"sdc_progression": 1.0, "offroad": -2.0, "overlap": -4.0},
     )
     env_config = dataclasses.replace(
         _config.EnvironmentConfig(),
@@ -82,7 +129,7 @@ def setup_waymax(data_path: str, use_idm: bool = False):
     return env, scenario_loader
 
 
-def setup_agent(env):
+def setup_agent(env, experiment_dir=None, experiment_name=None, is_eval=False):
     """Create and configure the PPO agent"""
     mem_size = 16384
     ppo_memory = RandomMemory(memory_size=mem_size, num_envs=1)
@@ -99,18 +146,29 @@ def setup_agent(env):
     ppo_cfg = PPO_DEFAULT_CONFIG.copy()
     ppo_cfg["rollouts"] = mem_size
     ppo_cfg["mini_batches"] = 32
-    ppo_cfg["learning_epochs"] = 8
-    ppo_cfg["entropy_loss_scale"] = 0.01
+    ppo_cfg["learning_epochs"] = 10
+    ppo_cfg["entropy_loss_scale"] = 1.0
     ppo_cfg["ratio_clip"] = 0.2
     ppo_cfg["learning_rate_scheduler"] = KLAdaptiveRL
-    ppo_cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.05}
+    ppo_cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.1}
     ppo_cfg["state_preprocessor"] = RunningStandardScaler
     ppo_cfg["state_preprocessor_kwargs"] = {"size": env.observation_space}
     ppo_cfg["value_preprocessor"] = RunningStandardScaler
     ppo_cfg["value_preprocessor_kwargs"] = {"size": 1}
-    ppo_cfg["experiment"]["experiment_name"] = "{}_{}".format(
-        datetime.datetime.now().strftime("%y-%m-%d_%H-%M"), ACTION_SPACE_TYPE
-    )
+
+    if experiment_name is None:
+        experiment_name = "{}_{}".format(
+            datetime.datetime.now().strftime("%y-%m-%d_%H-%M"), ACTION_SPACE_TYPE
+        )
+
+    ppo_cfg["experiment"]["experiment_name"] = experiment_name
+
+    if experiment_dir is not None:
+        ppo_cfg["experiment"]["directory"] = experiment_dir
+
+    # Disable checkpoints during evaluation
+    if is_eval:
+        ppo_cfg["experiment"]["checkpoint_interval"] = 0
 
     ppo_agent = PPO(
         models=ppo_models,
@@ -120,7 +178,7 @@ def setup_agent(env):
         action_space=env.action_space,
     )
 
-    return ppo_agent, ppo_cfg
+    return ppo_agent
 
 
 if __name__ == "__main__":
@@ -129,13 +187,19 @@ if __name__ == "__main__":
 
     if MODE == "train":
         print("Starting TRAINING mode...")
+
         # Setup training environment
-        training_path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord@1000"
-        env, scenario_loader = setup_waymax(training_path)
+        training_path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord"
+        env, scenario_loader = setup_waymax(
+            training_path,
+            use_idm=False,
+            shard_start=TRAIN_SHARD_START,
+            shard_count=TRAIN_SHARD_COUNT,
+        )
         env = WaymaxWrapper(env, scenario_loader, action_space_type=ACTION_SPACE_TYPE)
 
         # Setup agent
-        ppo_agent, ppo_cfg = setup_agent(env)
+        ppo_agent = setup_agent(env)
 
         # Load model if continuing training
         if MODEL_PATH:
@@ -160,12 +224,25 @@ if __name__ == "__main__":
     else:  # Evaluation mode
         print("Starting EVALUATION mode...")
         # Setup evaluation environment directly
-        test_path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/testing/testing_tfexample.tfrecord@150"
-        env, scenario_loader = setup_waymax(test_path, use_idm=True)
+        training_path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord"
+        env, scenario_loader = setup_waymax(
+            training_path,
+            use_idm=True,
+            shard_start=EVAL_SHARD_START,
+            shard_count=EVAL_SHARD_COUNT,
+        )
         env = WaymaxWrapper(env, scenario_loader, action_space_type=ACTION_SPACE_TYPE)
 
-        # Setup agent with the evaluation environment
-        ppo_agent, ppo_cfg = setup_agent(env)
+        # Extract the training experiment folder from the model path and configure eval logging
+        import os
+
+        training_experiment_folder = os.path.dirname(os.path.dirname(MODEL_PATH))
+        eval_log_dir = os.path.join(training_experiment_folder, "eval_logs")
+
+        # Setup agent with the evaluation environment - disable checkpoints
+        ppo_agent = setup_agent(
+            env, experiment_dir=eval_log_dir, experiment_name="evaluation", is_eval=True
+        )
 
         # Load saved model
         print(f"Loading model from {MODEL_PATH}")
@@ -180,6 +257,7 @@ if __name__ == "__main__":
 
         # Start evaluation
         print(f"Evaluating for {cfg_trainer['timesteps']} timesteps...")
+        print(f"Evaluation logs will be saved to: {eval_log_dir}")
         trainer.eval()
 
         # Print evaluation statistics
