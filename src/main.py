@@ -1,7 +1,8 @@
 import dataclasses
 import datetime
 import math
-from typing import Sequence
+import os
+from typing import Sequence, Tuple
 
 from skrl import config
 from skrl.agents.jax.ppo import PPO, PPO_DEFAULT_CONFIG
@@ -50,10 +51,10 @@ MODE = "eval"  # "train" or "eval"
 
 # Agent configuration
 ACTION_SPACE_TYPE = "bicycle"  # bicycle/bicycle_mpc/trajectory_sampling
-MODEL_PATH = "runs/25-06-07_03-00_bicycle/checkpoints/best_agent.pickle"
+MODEL_PATH = "runs/25-06-07_18-29_bicycle/training/25-06-07_18-29_bicycle/checkpoints/best_agent.pickle"
 
 # Training and evaluation parameters
-TRAIN_TIMESTEPS = 3000000
+TRAIN_TIMESTEPS = 5000000
 EVAL_TIMESTEPS = 1000
 HEADLESS = False  # Set to False to enable visualization
 
@@ -145,12 +146,12 @@ def setup_agent(env, experiment_dir=None, experiment_name=None, is_eval=False):
 
     ppo_cfg = PPO_DEFAULT_CONFIG.copy()
     ppo_cfg["rollouts"] = mem_size
-    ppo_cfg["mini_batches"] = 32
-    ppo_cfg["learning_epochs"] = 10
+    ppo_cfg["mini_batches"] = 128
+    ppo_cfg["learning_epochs"] = 20
     ppo_cfg["entropy_loss_scale"] = 1.0
     ppo_cfg["ratio_clip"] = 0.2
     ppo_cfg["learning_rate_scheduler"] = KLAdaptiveRL
-    ppo_cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.1}
+    ppo_cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.15}
     ppo_cfg["state_preprocessor"] = RunningStandardScaler
     ppo_cfg["state_preprocessor_kwargs"] = {"size": env.observation_space}
     ppo_cfg["value_preprocessor"] = RunningStandardScaler
@@ -181,12 +182,30 @@ def setup_agent(env, experiment_dir=None, experiment_name=None, is_eval=False):
     return ppo_agent
 
 
+def create_experiment_directories(base_name: str) -> Tuple[str, str]:
+    """Create organized experiment directories"""
+    timestamp = datetime.datetime.now().strftime("%y-%m-%d_%H-%M")
+    experiment_name = f"{timestamp}_{base_name}"
+
+    base_dir = os.path.join("runs", experiment_name)
+    train_dir = os.path.join(base_dir, "training")
+    eval_dir = os.path.join(base_dir, "evaluation")
+
+    os.makedirs(train_dir, exist_ok=True)
+    os.makedirs(eval_dir, exist_ok=True)
+
+    return train_dir, eval_dir
+
+
 if __name__ == "__main__":
     # Set the backend to "jax" or "numpy"
     config.jax.backend = "numpy"
 
     if MODE == "train":
         print("Starting TRAINING mode...")
+
+        # Create organized directories
+        train_dir, eval_dir = create_experiment_directories(ACTION_SPACE_TYPE)
 
         # Setup training environment
         training_path = "gs://waymo_open_dataset_motion_v_1_3_0/uncompressed/tf_example/training/training_tfexample.tfrecord"
@@ -196,10 +215,18 @@ if __name__ == "__main__":
             shard_start=TRAIN_SHARD_START,
             shard_count=TRAIN_SHARD_COUNT,
         )
-        env = WaymaxWrapper(env, scenario_loader, action_space_type=ACTION_SPACE_TYPE)
 
-        # Setup agent
-        ppo_agent = setup_agent(env)
+        # Initialize wrapper with training directory and video settings
+        env = WaymaxWrapper(
+            env,
+            scenario_loader,
+            action_space_type=ACTION_SPACE_TYPE,
+            save_dir=train_dir,
+            save_videos=False,  # Disable videos during training for speed
+        )
+
+        # Setup agent with training directory
+        ppo_agent = setup_agent(env, experiment_dir=train_dir)
 
         # Load model if continuing training
         if MODEL_PATH:
@@ -209,7 +236,7 @@ if __name__ == "__main__":
         # Configure trainer using parameters from config section
         cfg_trainer = {
             "timesteps": TRAIN_TIMESTEPS,
-            "headless": HEADLESS,
+            "headless": False,
         }
         trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[ppo_agent])
 
@@ -231,17 +258,22 @@ if __name__ == "__main__":
             shard_start=EVAL_SHARD_START,
             shard_count=EVAL_SHARD_COUNT,
         )
-        env = WaymaxWrapper(env, scenario_loader, action_space_type=ACTION_SPACE_TYPE)
 
         # Extract the training experiment folder from the model path and configure eval logging
-        import os
+        model_dir = os.path.dirname(os.path.dirname(MODEL_PATH))
+        eval_dir = os.path.join(model_dir, "evaluation")
 
-        training_experiment_folder = os.path.dirname(os.path.dirname(MODEL_PATH))
-        eval_log_dir = os.path.join(training_experiment_folder, "eval_logs")
+        env = WaymaxWrapper(
+            env,
+            scenario_loader,
+            action_space_type=ACTION_SPACE_TYPE,
+            save_dir=eval_dir,
+            save_videos=HEADLESS,
+        )
 
         # Setup agent with the evaluation environment - disable checkpoints
         ppo_agent = setup_agent(
-            env, experiment_dir=eval_log_dir, experiment_name="evaluation", is_eval=True
+            env, experiment_dir=eval_dir, experiment_name="evaluation", is_eval=True
         )
 
         # Load saved model
@@ -257,7 +289,7 @@ if __name__ == "__main__":
 
         # Start evaluation
         print(f"Evaluating for {cfg_trainer['timesteps']} timesteps...")
-        print(f"Evaluation logs will be saved to: {eval_log_dir}")
+        print(f"Evaluation logs will be saved to: {eval_dir}")
         trainer.eval()
 
         # Print evaluation statistics
