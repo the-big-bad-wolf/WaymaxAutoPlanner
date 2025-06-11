@@ -63,28 +63,28 @@ class Policy_Model(GaussianMixin, Model):
         x = jnp.concatenate([x, misc_features], axis=1)
 
         # Final MLP layers
-        x = nn.leaky_relu(nn.Dense(96)(x))
-        x = nn.leaky_relu(nn.Dense(96)(x))
+        x = nn.leaky_relu(nn.Dense(512)(x))
+        x = nn.leaky_relu(nn.Dense(256)(x))
         x = nn.Dense(self.num_actions)(x)  # type: ignore
         log_std = self.param("log_std", lambda _: jnp.zeros(self.num_actions))
 
         # Apply tanh to the output for bicycle action
-        x = nn.tanh(x)
+        # x = nn.tanh(x)
 
         # Transform output to match trajectory sampling
         # Split the output into three parts
-        # x1 = x[:, :8]  # Mean values
-        # x2 = x[:, 8:16]  # Diagonal elements
-        # x3 = x[:, 16:]  # Off-diagonal elements
+        x1 = x[:, :8]  # Mean values
+        x2 = x[:, 8:16]  # Diagonal elements
+        x3 = x[:, 16:]  # Off-diagonal elements
 
         # Transform first means to be between -1 and 1 using tanh
-        # x1 = nn.tanh(x1)
+        x1 = nn.tanh(x1)
 
         # Transform the diagonal elements to be positive using softplus
-        # x2 = nn.softplus(x2)
+        x2 = nn.softplus(x2)
 
         # Combine the transformed parts back together
-        # x = jnp.concatenate([x1, x2, x3], axis=1)
+        x = jnp.concatenate([x1, x2, x3], axis=1)
 
         return x, log_std, {}
 
@@ -138,8 +138,8 @@ class Value_Model(DeterministicMixin, Model):
         x = jnp.concatenate([x, misc_features], axis=1)
 
         # Final MLP layers
-        x = nn.leaky_relu(nn.Dense(96)(x))
-        x = nn.leaky_relu(nn.Dense(96)(x))
+        x = nn.leaky_relu(nn.Dense(256)(x))
+        x = nn.leaky_relu(nn.Dense(128)(x))
         x = nn.Dense(1)(x)
 
         return x, {}
