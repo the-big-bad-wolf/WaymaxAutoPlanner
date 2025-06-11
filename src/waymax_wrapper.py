@@ -281,7 +281,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             metrics_to_run=("sdc_progression", "overlap")
         )
         reward_config = _config.LinearCombinationRewardConfig(
-            rewards={"sdc_progression": 1.0, "overlap": -2.0},
+            rewards={"sdc_progression": 1.0, "overlap": -4.0},
         )
         env_config = dataclasses.replace(
             _config.EnvironmentConfig(),
@@ -485,7 +485,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         Union[np.ndarray, jax.Array],
         Any,
     ]:
-        """Step implementation for trajectory sampling action space"""
+        """Step implementation for trajectory sampling action space - using single steps"""
         # Extract the mean and Cholesky parameters from the action vector
         means = jnp.array(actions[: self._mean_dim])
         cholesky_diag = jnp.array(
@@ -514,31 +514,32 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             subkey,
         )
 
-        multistep = int(round(self._replan_interval / self._DT))
+        # Use only the first action from the sequence for a single step
+        current_action = action_sequence[0]
 
-        # Perform a multi-step rollout with the action sequence and track events
+        # Perform a single step with the first action
         (
             self._current_state,
             observation,
             reward,
             terminated,
             truncated,
-            had_overlap,
-            had_offroad,
-            progression,
-        ) = merged_multistep(
-            self._env,
-            self._current_state,
-            action_sequence,
-            multistep,
+            metrics,
+        ) = merged_step(self._env, self._current_state, current_action)
+
+        # Detect events from metrics
+        overlap_detected, offroad_detected, progression = _detect_events_from_metrics(
+            metrics
         )
 
-        # Update episode tracking flags using the accumulated events from all steps
-        self._current_episode_had_overlap = jnp.maximum(
-            self._current_episode_had_overlap, had_overlap
-        )
-        self._current_episode_had_offroad = jnp.maximum(
-            self._current_episode_had_offroad, had_offroad
+        # Update episode tracking flags
+        self._current_episode_had_overlap, self._current_episode_had_offroad = (
+            _update_episode_metrics(
+                self._current_episode_had_overlap,
+                self._current_episode_had_offroad,
+                overlap_detected,
+                offroad_detected,
+            )
         )
 
         # Store the current progression
@@ -552,10 +553,10 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
 
         # Shift the action sequence for the next step (receding horizon)
         # Take the sequence from the second element onwards
-        shifted_sequence = action_sequence[multistep:]
+        shifted_sequence = action_sequence[1:]
         # Create a zero action with the same shape and dtype as one action step
         zero_action = jnp.zeros(
-            (multistep, action_sequence.shape[1]), dtype=action_sequence.dtype
+            (1, action_sequence.shape[1]), dtype=action_sequence.dtype
         )
         # Update the stored sequence by appending the zero action
         self._current_action_plan = jnp.concatenate(
