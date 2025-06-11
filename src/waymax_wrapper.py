@@ -50,60 +50,56 @@ def merged_multistep(
     actions: jax.Array,
     num_steps: int,
 ):
-    """Performs a multi-step rollout using Waymax's native rollout functionality."""
+    """Performs a multi-step rollout using JAX for loop with environment steps."""
 
-    # Define simplified actor logic with less redundant operations
-    def init_fn(rng, state):
-        return {"action_index": 0}
+    def step_body(i, carry):
+        current_state, all_states, all_rewards = carry
 
-    def select_action(params, state, actor_state, rng):
-        # Get current action directly without redundant slicing/squeezing
-        action_index = actor_state["action_index"]
-        action = params["action_sequence"][action_index]
+        # Get action for current step
+        action_data = actions[i]
+        action = datatypes.Action(data=action_data, valid=jnp.ones(1, dtype=bool))
 
-        # Create action object directly without redundant array creation
-        action_obj = datatypes.Action(data=action, valid=jnp.ones(1, dtype=bool))
+        # Step the environment
+        new_state = env.step(current_state, action)
+        reward = env.reward(new_state, action)
 
-        # Increment with a simpler expression
-        actor_state = {"action_index": jnp.minimum(action_index + 1, num_steps - 1)}
+        # Update arrays using jax.tree_map for states
+        all_states = jax.tree_map(lambda x, y: x.at[i].set(y), all_states, new_state)
+        all_rewards = all_rewards.at[i].set(reward)
 
-        return agents.WaymaxActorOutput(
-            actor_state=actor_state,
-            action=action_obj,
-            is_controlled=state.object_metadata.is_sdc,
-        )
+        return new_state, all_states, all_rewards
 
-    # Create actor with simplified parameters
-    sequence_actor = agents.actor_core_factory(init_fn, select_action)
-    actor_params = {"action_sequence": actions}
-
-    # Run rollout with static key to avoid redundant key generation
-    rollout_output = _env.rollout(
-        scenario=state,
-        actor=sequence_actor,
-        env=env,
-        rng=jax.random.PRNGKey(0),  # Deterministic key because not needed
-        rollout_num_steps=num_steps,
-        actor_params=actor_params,
+    # Initialize storage arrays using the current state structure and reward spec
+    all_states = jax.tree_map(
+        lambda x: jnp.zeros((num_steps,) + x.shape, dtype=x.dtype), state
     )
 
-    # Extract final state directly
-    final_state = jax.tree_map(lambda x: x[-1], rollout_output.state)
-    metrics_history = rollout_output.metrics
+    # Get reward shape from environment spec
+    reward_spec = env.reward_spec()
+    all_rewards = jnp.zeros((num_steps,) + reward_spec.shape, dtype=reward_spec.dtype)
 
-    # Simplify overlap/offroad detection with one jnp.any call
-    overlap_detected = jnp.any(metrics_history["overlap"].value > 0).astype(jnp.int32)
-    offroad_detected = jnp.any(metrics_history["offroad"].value > 0).astype(jnp.int32)
+    # Run the for loop
+    final_state, all_states, all_rewards = jax.lax.fori_loop(
+        0, num_steps, step_body, (state, all_states, all_rewards)
+    )
 
-    # Get progression data directly
-    progression_values = metrics_history["sdc_progression"].value
-    rollout_progression = progression_values[-1]
-
-    # Get reward and reshape in one operation
-    total_reward = jnp.sum(rollout_output.reward).reshape(1, -1)
-
-    # Get observation and reshape in one operation
+    # Get final observation and reshape
     observation = env.observe(final_state).reshape(1, -1)
+
+    # Calculate metrics from all states
+    all_metrics = jax.vmap(env.metrics)(all_states)
+
+    # Detect overlap/offroad events across all steps
+    overlap_detected = jnp.any(all_metrics["overlap"].value > 0).astype(jnp.int32)
+    offroad_detected = jnp.any(all_metrics["offroad"].value > 0).astype(jnp.int32)
+
+    # Get final progression
+    rollout_progression = all_metrics["sdc_progression"].value[-1]
+
+    # Sum all rewards and reshape
+    total_reward = jnp.sum(all_rewards).reshape(1, -1)
+
+    # Get termination and truncation for final state
     terminated = env.termination(final_state).reshape(1, -1)
     truncated = env.truncation(final_state).reshape(1, -1)
 
@@ -116,6 +112,8 @@ def merged_multistep(
         overlap_detected,
         offroad_detected,
         rollout_progression,
+        all_states,
+        all_rewards,
     )
 
 
@@ -189,7 +187,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         env: _env.PlanningAgentEnvironment,
         scenario_loader: Iterator[datatypes.SimulatorState],
         action_space_type: str = "bicycle",
-        save_dir: str = None,  # Add save directory parameter
+        save_dir: str | None = None,  # Add save directory parameter
         save_videos: bool = True,  # Option to disable video saving
     ):
         """
@@ -278,10 +276,10 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             speed=None,
         )
         metrics_config = _config.MetricsConfig(
-            metrics_to_run=("sdc_progression", "overlap")
+            metrics_to_run=("sdc_progression", "offroad", "overlap")
         )
         reward_config = _config.LinearCombinationRewardConfig(
-            rewards={"sdc_progression": 1.0, "overlap": -4.0},
+            rewards={"sdc_progression": 1.0, "offroad": -2.0, "overlap": -4.0},
         )
         env_config = dataclasses.replace(
             _config.EnvironmentConfig(),
@@ -295,7 +293,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             sim_agent_actors=[constant_actor],
             sim_agent_params=[{}],
         )
-        self._replan_interval = 0.1  # seconds
+        self._replan_interval = 2  # seconds
 
     @override
     def reset(self) -> Tuple[Union[np.ndarray, jax.Array], Any]:
@@ -485,7 +483,7 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         Union[np.ndarray, jax.Array],
         Any,
     ]:
-        """Step implementation for trajectory sampling action space - using single steps"""
+        """Step implementation for trajectory sampling action space - using multi-step rollout"""
         # Extract the mean and Cholesky parameters from the action vector
         means = jnp.array(actions[: self._mean_dim])
         cholesky_diag = jnp.array(
@@ -514,23 +512,36 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             subkey,
         )
 
-        # Use only the first action from the sequence for a single step
-        current_action = action_sequence[0]
+        # Use the full action sequence for multi-step rollout
+        num_steps = int(self._replan_interval / self._DT)
 
-        # Perform a single step with the first action
         (
             self._current_state,
             observation,
             reward,
             terminated,
             truncated,
-            metrics,
-        ) = merged_step(self._env, self._current_state, current_action)
+            overlap_detected,
+            offroad_detected,
+            progression,
+            all_states,
+            all_rewards,
+        ) = merged_multistep(self._env, self._current_state, action_sequence, num_steps)
 
-        # Detect events from metrics
-        overlap_detected, offroad_detected, progression = _detect_events_from_metrics(
-            metrics
-        )
+        """
+        if self._save_videos:
+            # Convert JAX arrays to numpy and store each state
+            for i in range(
+                all_states.sim_trajectory.x.shape[0]
+            ):  # Iterate over timesteps
+                # Extract state at timestep i
+                state_i = jax.tree_map(lambda x: x[i], all_states)
+                reward_i = float(all_rewards[i])
+
+                self._states.append(state_i)
+                self._rewards.append(reward_i)
+                self._action_sequences.append(np.array(action_sequence))
+        """
 
         # Update episode tracking flags
         self._current_episode_had_overlap, self._current_episode_had_offroad = (
@@ -551,16 +562,9 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
         truncated = np.array(truncated).reshape(1, -1)
         self._current_reward = reward[0, 0]
 
-        # Shift the action sequence for the next step (receding horizon)
-        # Take the sequence from the second element onwards
-        shifted_sequence = action_sequence[1:]
-        # Create a zero action with the same shape and dtype as one action step
-        zero_action = jnp.zeros(
-            (1, action_sequence.shape[1]), dtype=action_sequence.dtype
-        )
-        # Update the stored sequence by appending the zero action
-        self._current_action_plan = jnp.concatenate(
-            [shifted_sequence, zero_action], axis=0
+        # Reset action plan for next iteration (since we executed the full sequence)
+        self._current_action_plan = jnp.zeros(
+            (int(round(self._horizon / self._DT)), 2), dtype=jnp.float32
         )
 
         return observation, reward, terminated, truncated, {}
@@ -811,3 +815,77 @@ class WaymaxWrapper(skrl_wrappers.Wrapper):
             "offroad_percentage": offroad_percentage,
             "average_progression": average_progression,
         }
+
+    def _save_action_sequence_video(self, action_seq_video_path: str) -> None:
+        """Generate and save action sequence visualization video"""
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.patches import Rectangle
+
+            # Create figure for action sequence plots
+            fig_width, fig_height = 12, 8
+
+            imgs = []
+            for i, action_seq in enumerate(self._action_sequences):
+                fig = Figure(figsize=(fig_width, fig_height))
+                canvas = FigureCanvasAgg(fig)
+
+                # Create subplots for acceleration and steering
+                ax1 = fig.add_subplot(2, 1, 1)
+                ax2 = fig.add_subplot(2, 1, 2)
+
+                # Plot acceleration sequence
+                time_steps = np.arange(len(action_seq)) * self._DT
+                accelerations = action_seq[:, 0]
+                ax1.plot(
+                    time_steps, accelerations, "b-", linewidth=2, label="Acceleration"
+                )
+                ax1.set_ylabel("Acceleration (m/s²)")
+                ax1.set_title(f"Action Sequence {i+1}/{len(self._action_sequences)}")
+                ax1.grid(True, alpha=0.3)
+                ax1.legend()
+
+                # Plot steering sequence
+                steering_angles = action_seq[:, 1]
+                ax2.plot(
+                    time_steps, steering_angles, "r-", linewidth=2, label="Steering"
+                )
+                ax2.set_xlabel("Time (s)")
+                ax2.set_ylabel("Steering Angle (rad)")
+                ax2.grid(True, alpha=0.3)
+                ax2.legend()
+
+                # Add timestep indicator
+                if i < len(self._action_sequences):
+                    current_time = i * self._replan_interval
+                    for ax in [ax1, ax2]:
+                        ax.axvline(
+                            x=current_time,
+                            color="green",
+                            linestyle="--",
+                            linewidth=2,
+                            alpha=0.7,
+                            label="Current Time",
+                        )
+
+                fig.tight_layout()
+
+                # Convert matplotlib figure to numpy array
+                canvas.draw()
+                buf = np.frombuffer(canvas.tostring_rgb(), dtype=np.uint8)
+                buf = buf.reshape(canvas.get_width_height()[::-1] + (3,))
+                imgs.append(buf)
+
+                # Clean up
+                fig.clear()
+                plt.close(fig)
+
+            # Save video
+            if imgs:
+                mediapy.write_video(action_seq_video_path, imgs, fps=10)
+                print(f"Action sequence video saved to '{action_seq_video_path}'")
+            else:
+                print("No action sequences to save")
+
+        except Exception as e:
+            print(f"Failed to save action sequence video: {e}")
