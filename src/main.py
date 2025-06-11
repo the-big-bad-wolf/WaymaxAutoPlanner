@@ -47,16 +47,16 @@ from waymax_wrapper import WaymaxWrapper
 # CONFIGURATION - Edit these variables to change behavior
 #####################################################################
 # Run mode
-MODE = "eval"  # "train" or "eval"
+MODE = "train"  # "train" or "eval"
 
 # Agent configuration
-ACTION_SPACE_TYPE = "bicycle"  # bicycle/bicycle_mpc/trajectory_sampling
-MODEL_PATH = "runs/25-06-07_18-29_bicycle/training/25-06-07_18-29_bicycle/checkpoints/best_agent.pickle"
+ACTION_SPACE_TYPE = "trajectory_sampling"  # bicycle/bicycle_mpc/trajectory_sampling
+MODEL_PATH = None
 
 # Training and evaluation parameters
 TRAIN_TIMESTEPS = 5000000
-EVAL_TIMESTEPS = 1000
-HEADLESS = False  # Set to False to enable visualization
+EVAL_TIMESTEPS = 500000
+HEADLESS = True  # Set to False to enable visualization
 
 # Dataset configuration
 TRAIN_SHARD_START = 0
@@ -132,7 +132,7 @@ def setup_waymax(
 
 def setup_agent(env, experiment_dir=None, experiment_name=None, is_eval=False):
     """Create and configure the PPO agent"""
-    mem_size = 16384
+    mem_size = 65536
     ppo_memory = RandomMemory(memory_size=mem_size, num_envs=1)
 
     ppo_models = {}
@@ -147,11 +147,10 @@ def setup_agent(env, experiment_dir=None, experiment_name=None, is_eval=False):
     ppo_cfg = PPO_DEFAULT_CONFIG.copy()
     ppo_cfg["rollouts"] = mem_size
     ppo_cfg["mini_batches"] = 128
-    ppo_cfg["learning_epochs"] = 20
-    ppo_cfg["entropy_loss_scale"] = 1.0
-    ppo_cfg["ratio_clip"] = 0.2
+    ppo_cfg["learning_epochs"] = 10
+    ppo_cfg["entropy_loss_scale"] = 1
     ppo_cfg["learning_rate_scheduler"] = KLAdaptiveRL
-    ppo_cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.15}
+    ppo_cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.01}
     ppo_cfg["state_preprocessor"] = RunningStandardScaler
     ppo_cfg["state_preprocessor_kwargs"] = {"size": env.observation_space}
     ppo_cfg["value_preprocessor"] = RunningStandardScaler
@@ -222,7 +221,7 @@ if __name__ == "__main__":
             scenario_loader,
             action_space_type=ACTION_SPACE_TYPE,
             save_dir=train_dir,
-            save_videos=False,  # Disable videos during training for speed
+            save_videos=not HEADLESS,  # Disable videos during training for speed
         )
 
         # Setup agent with training directory
@@ -236,7 +235,7 @@ if __name__ == "__main__":
         # Configure trainer using parameters from config section
         cfg_trainer = {
             "timesteps": TRAIN_TIMESTEPS,
-            "headless": False,
+            "headless": HEADLESS,
         }
         trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[ppo_agent])
 
@@ -259,16 +258,22 @@ if __name__ == "__main__":
             shard_count=EVAL_SHARD_COUNT,
         )
 
-        # Extract the training experiment folder from the model path and configure eval logging
-        model_dir = os.path.dirname(os.path.dirname(MODEL_PATH))
-        eval_dir = os.path.join(model_dir, "evaluation")
+        # Create evaluation directory at the same level as training directory
+        # MODEL_PATH: runs/25-06-08_03-56_bicycle/training/25-06-08_03-56_bicycle/checkpoints/best_agent.pickle
+        # We want: runs/25-06-08_03-56_bicycle/evaluation/
+        model_parts = MODEL_PATH.split(os.sep)
+        base_experiment_dir = os.sep.join(
+            model_parts[:2]
+        )  # Gets "runs/25-06-08_03-56_bicycle"
+        eval_dir = os.path.join(base_experiment_dir, "evaluation")
+        os.makedirs(eval_dir, exist_ok=True)
 
         env = WaymaxWrapper(
             env,
             scenario_loader,
             action_space_type=ACTION_SPACE_TYPE,
             save_dir=eval_dir,
-            save_videos=HEADLESS,
+            save_videos=not HEADLESS,  # Always save videos during evaluation, regardless of HEADLESS
         )
 
         # Setup agent with the evaluation environment - disable checkpoints
