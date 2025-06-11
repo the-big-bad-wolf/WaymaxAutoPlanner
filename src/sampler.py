@@ -58,8 +58,8 @@ def _evaluate_bernstein_polynomials(
     poly2_samples = samples[:, num_params_per_poly:]
 
     # Transform coefficients using tanh
-    # transformed_poly1_coeffs = jnp.tanh(poly1_samples)
-    # transformed_poly2_coeffs = jnp.tanh(poly2_samples)
+    transformed_poly1_coeffs = jnp.tanh(poly1_samples)
+    transformed_poly2_coeffs = jnp.tanh(poly2_samples)
 
     # Generate normalized time steps [0, 1]
     t_norm = jnp.linspace(0, 1, num_steps)
@@ -79,8 +79,8 @@ def _evaluate_bernstein_polynomials(
     eval_all_polys_over_time = jax.vmap(eval_single_poly_over_time, in_axes=(0, None))
 
     # Evaluate both sets of polynomials
-    poly1_values = eval_all_polys_over_time(poly1_samples, t_norm)
-    poly2_values = eval_all_polys_over_time(poly2_samples, t_norm)
+    poly1_values = eval_all_polys_over_time(transformed_poly1_coeffs, t_norm)
+    poly2_values = eval_all_polys_over_time(transformed_poly2_coeffs, t_norm)
 
     # Stack the results to form action sequences
     action_sequences = jnp.stack([poly1_values, poly2_values], axis=-1)
