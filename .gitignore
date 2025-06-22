@@ -71,7 +71,7 @@ poetry.lock
 
 data/
 runs/
-*.mp4
+
 
 *.c
 *.h
