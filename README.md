@@ -1,6 +1,8 @@
 Configure access to the Waymo Open Motion Dataset by following the instructions at https://github.com/waymo-research/waymax
 
 
+Demo videos of the agents can be downloaded below:
+
 ![Baseline Agent](demo_videos/baseline.mp4)
 
 ![Pure MPC Agent](demo_videos/mpc.mp4)
