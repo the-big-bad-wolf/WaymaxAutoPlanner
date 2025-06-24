@@ -259,8 +259,6 @@ if __name__ == "__main__":
         )
 
         # Create evaluation directory at the same level as training directory
-        # MODEL_PATH: runs/25-06-08_03-56_bicycle/training/25-06-08_03-56_bicycle/checkpoints/best_agent.pickle
-        # We want: runs/25-06-08_03-56_bicycle/evaluation/
         model_parts = MODEL_PATH.split(os.sep)
         base_experiment_dir = os.sep.join(
             model_parts[:2]
